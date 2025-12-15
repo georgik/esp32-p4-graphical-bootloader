@@ -35,44 +35,243 @@ typedef struct {
     int otaIndex;  // Which OTA partition this tile represents (-1 for info)
 } Tile;
 
+// Boot state for visual feedback
+typedef enum {
+    BOOT_STATE_SELECTING,
+    BOOT_STATE_BOOTING,
+    BOOT_STATE_ERROR
+} boot_state_t;
+
+static boot_state_t current_boot_state = BOOT_STATE_SELECTING;
+static const char* booting_app_name = NULL;
+static int booting_animation_time = 0;
+static int selected_tile_index = -1;
+
+// Get app label by OTA index
+static const char* get_app_label_by_index(int app_index) {
+    const char* labels[] = {
+        "LVGL", "Embedded Wizard", "Slint", "Qt",
+        "Candera/CGI Studio", "Raylib", "SDL3", "Info"
+    };
+    if (app_index >= 0 && app_index < 8) {
+        return labels[app_index];
+    }
+    return "Unknown";
+}
+
 // OTA switching function - similar to the LVGL bootloader
 static void ota_switch_to_app(int app_index) {
     ESP_LOGI(TAG, "Attempting to switch to OTA partition %d", app_index);
 
-    // Initially assume the first OTA partition, which is typically 'ota_0'
-    const esp_partition_t *next_partition = esp_ota_get_next_update_partition(NULL);
-
-    // Iterate to find the correct OTA partition only if app_index is greater than 0
-    if (app_index > 0 && app_index <= 7) {  // We have 8 OTA partitions (0-7)
-        for (int i = 0; i < app_index; i++) {
-            next_partition = esp_ota_get_next_update_partition(next_partition);
-            if (!next_partition) {
-                ESP_LOGE(TAG, "Failed to get next OTA partition at iteration %d", i);
-                break;
-            }
-        }
+    // Check if we have a valid app index
+    if (app_index < 0 || app_index > 7) {
+        ESP_LOGE(TAG, "Invalid app_index %d, must be between 0-7", app_index);
+        current_boot_state = BOOT_STATE_ERROR;
+        return;
     }
 
-    // For app_index 0, next_partition will not change, thus pointing to 'ota_0'
-    if (next_partition && esp_ota_set_boot_partition(next_partition) == ESP_OK) {
-        ESP_LOGI(TAG, "Successfully set boot partition to %s (%s)",
-                 next_partition->label ? next_partition->label : "unknown",
-                 next_partition->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0 ? "ota_0" :
-                 next_partition->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_1 ? "ota_1" :
-                 next_partition->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_2 ? "ota_2" :
-                 next_partition->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_3 ? "ota_3" :
-                 next_partition->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_4 ? "ota_4" :
-                 next_partition->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_5 ? "ota_5" :
-                 next_partition->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_6 ? "ota_6" :
-                 next_partition->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_7 ? "ota_7" : "unknown");
+    // Set booting state for visual feedback
+    current_boot_state = BOOT_STATE_BOOTING;
+    booting_app_name = get_app_label_by_index(app_index);
+    booting_animation_time = 0;
+
+    ESP_LOGI(TAG, "Booting application: %s (OTA index: %d)", booting_app_name, app_index);
+
+    // Get the current running partition
+    const esp_partition_t *current_partition = esp_ota_get_running_partition();
+    if (current_partition) {
+        ESP_LOGI(TAG, "Current running partition: %s (subtype: %d)",
+                 current_partition->label ? current_partition->label : "unknown",
+                 current_partition->subtype);
+    }
+
+    // Find the target OTA partition directly
+    esp_partition_subtype_t target_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_0 + app_index;
+    const esp_partition_t *ota_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, target_subtype, NULL);
+
+    if (!ota_partition) {
+        ESP_LOGE(TAG, "Failed to find OTA partition %d (subtype %d)", app_index, target_subtype);
+        current_boot_state = BOOT_STATE_ERROR;
+        return;
+    }
+
+    // Skip if this is the currently running partition
+    if (current_partition && ota_partition == current_partition) {
+        ESP_LOGI(TAG, "Target partition %s is already running",
+                 ota_partition->label ? ota_partition->label : "unknown");
+        current_boot_state = BOOT_STATE_ERROR;
+        return;
+    }
+
+    ESP_LOGI(TAG, "Found target OTA partition: %s (subtype: %d, offset: 0x%x)",
+             ota_partition->label ? ota_partition->label : "unknown",
+             ota_partition->subtype, ota_partition->address);
+
+    // Add delay to show booting animation
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // Set the boot partition to the selected OTA partition
+    esp_err_t err = esp_ota_set_boot_partition(ota_partition);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Successfully set boot partition to %s (index %d)",
+                 ota_partition->label ? ota_partition->label : "unknown", app_index);
 
         // Add a small delay to allow logging to complete
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(200));
         ESP_LOGI(TAG, "Restarting now to boot from the new partition...");
         esp_restart();
     } else {
-        ESP_LOGE(TAG, "Failed to set boot partition for app_index %d", app_index);
+        ESP_LOGE(TAG, "Failed to set boot partition: %s", esp_err_to_name(err));
+        current_boot_state = BOOT_STATE_ERROR;
     }
+}
+
+// Draw booting screen with animation
+static void draw_booting_screen(int screenWidth, int screenHeight, int frameCounter) {
+    // Dark background during booting
+    Color bgColor = (Color){20, 20, 30, 255};
+    ClearBackground(bgColor);
+
+    // Pulsing boot animation
+    float pulse = sinf(frameCounter * 0.05f) * 0.3f + 0.7f;
+
+    // Main booting message
+    const char* mainMessage = "Booting Application...";
+    int mainFontSize = 30;
+    int mainWidth = MeasureText(mainMessage, mainFontSize);
+    int mainX = (screenWidth - mainWidth) / 2;
+    int mainY = screenHeight / 2 - 60;
+
+    Color mainColor = (Color){
+        (unsigned char)(255 * pulse),
+        (unsigned char)(255 * pulse),
+        (unsigned char)(255 * pulse),
+        255
+    };
+    DrawText(mainMessage, mainX, mainY, mainFontSize, mainColor);
+
+    // Application name
+    if (booting_app_name) {
+        char appMessage[64];
+        snprintf(appMessage, sizeof(appMessage), "Starting %s...", booting_app_name);
+        int appFontSize = 20;
+        int appWidth = MeasureText(appMessage, appFontSize);
+        int appX = (screenWidth - appWidth) / 2;
+        int appY = screenHeight / 2 - 20;
+
+        DrawText(appMessage, appX, appY, appFontSize, YELLOW);
+    }
+
+    // Loading dots animation
+    int dotCount = (frameCounter / 30) % 4;
+    for (int i = 0; i < dotCount; i++) {
+        int dotX = screenWidth / 2 - 30 + i * 20;
+        int dotY = screenHeight / 2 + 20;
+        int dotSize = 8 + (int)(sinf(frameCounter * 0.1f + i) * 3);
+
+        DrawCircleV((Vector2){dotX, dotY}, dotSize,
+                   (Color){255, 215, 0, (unsigned char)(255 * pulse)});
+    }
+
+    // Progress bar
+    int barWidth = 300;
+    int barHeight = 10;
+    int barX = (screenWidth - barWidth) / 2;
+    int barY = screenHeight / 2 + 50;
+
+    // Background bar
+    DrawRectangle(barX, barY, barWidth, barHeight, (Color){50, 50, 60, 255});
+
+    // Animated progress
+    int progress = (frameCounter * 2) % (barWidth + 40);
+    if (progress > barWidth) {
+        progress = barWidth - (progress - barWidth);
+    }
+    DrawRectangle(barX, barY, progress, barHeight, (Color){255, 215, 0, 255});
+
+    // Corner message
+    const char* cornerMsg = "Please wait...";
+    int cornerFontSize = 12;
+    DrawText(cornerMsg, 5, screenHeight - 20, cornerFontSize, GRAY);
+}
+
+// Draw error screen with restart button
+static bool draw_error_screen(int screenWidth, int screenHeight, esp_lcd_touch_handle_t touch_handle) {
+    Color bgColor = (Color){40, 20, 20, 255};
+    ClearBackground(bgColor);
+
+    const char* errorMsg = "Boot Failed!";
+    int errorFontSize = 30;
+    int errorWidth = MeasureText(errorMsg, errorFontSize);
+    int errorX = (screenWidth - errorWidth) / 2;
+    int errorY = screenHeight / 2 - 60;
+
+    DrawText(errorMsg, errorX, errorY, errorFontSize, RED);
+
+    const char* retryMsg = "Please try again";
+    int retryFontSize = 16;
+    int retryWidth = MeasureText(retryMsg, retryFontSize);
+    int retryX = (screenWidth - retryWidth) / 2;
+    int retryY = screenHeight / 2 - 20;
+
+    DrawText(retryMsg, retryX, retryY, retryFontSize, WHITE);
+
+    // Restart button
+    const char* restartText = "RESTART";
+    int restartFontSize = 20;
+    int restartWidth = MeasureText(restartText, restartFontSize);
+    int buttonWidth = restartWidth + 40;
+    int buttonHeight = 50;
+    int buttonX = (screenWidth - buttonWidth) / 2;
+    int buttonY = screenHeight / 2 + 20;
+
+    Rectangle restartButton = {buttonX, buttonY, buttonWidth, buttonHeight};
+
+    // Check if button is pressed
+    bool buttonPressed = false;
+    Vector2 mousePos = GetMousePosition();
+
+    // Read touch data
+    uint16_t touch_x[1] = {0};
+    uint16_t touch_y[1] = {0};
+    uint16_t touch_strength[1] = {0};
+    uint8_t touch_cnt = 0;
+
+    if (touch_handle && esp_lcd_touch_read_data(touch_handle) == ESP_OK) {
+        esp_lcd_touch_get_coordinates(touch_handle, touch_x, touch_y, touch_strength, &touch_cnt, 1);
+    }
+
+    // Check if mouse or touch is over button
+    bool mouseOverButton = CheckCollisionPointRec(mousePos, restartButton);
+    bool touchOverButton = (touch_cnt > 0 && CheckCollisionPointRec((Vector2){touch_x[0], touch_y[0]}, restartButton));
+
+    if (mouseOverButton || touchOverButton) {
+        DrawRectangleRec(restartButton, (Color){255, 100, 100, 255});
+        DrawRectangleLinesEx(restartButton, 3, (Color){255, 255, 255, 255});
+        buttonPressed = IsMouseButtonPressed(MOUSE_LEFT_BUTTON) || (touch_cnt > 0);
+    } else {
+        DrawRectangleRec(restartButton, (Color){180, 50, 50, 255});
+        DrawRectangleLinesEx(restartButton, 3, (Color){200, 200, 200, 255});
+    }
+
+    // Draw restart button text
+    int textX = restartButton.x + (restartButton.width - restartWidth) / 2;
+    int textY = restartButton.y + (restartButton.height - restartFontSize) / 2;
+    DrawText(restartText, textX, textY, restartFontSize, WHITE);
+
+    // Check if button was released (trigger restart)
+    static bool wasButtonPressed = false;
+    bool mouseReleased = IsMouseButtonReleased(MOUSE_LEFT_BUTTON);
+    bool touchReleased = (touch_cnt == 0 && wasButtonPressed);
+    bool buttonReleased = mouseReleased || touchReleased;
+
+    if (buttonPressed) {
+        wasButtonPressed = true;
+    } else {
+        wasButtonPressed = false;
+    }
+
+    return buttonReleased && (mouseOverButton || touchOverButton);
 }
 
 // Display information about the bootloader
@@ -134,6 +333,8 @@ void initialize_tiles(Tile* tiles, int screenWidth, int screenHeight) {
 // Update tile interaction states with touch support and OTA switching
 void update_tiles(Tile* tiles, int count, esp_lcd_touch_handle_t touch_handle) {
     static int64_t last_selection_time = 0;
+    static bool was_touching = false;
+    static Vector2 last_touch_pos = {-1, -1};  // Store last touch position for release detection
     Vector2 mousePos = GetMousePosition();
     uint16_t touch_x[1] = {0};
     uint16_t touch_y[1] = {0};
@@ -148,9 +349,13 @@ void update_tiles(Tile* tiles, int count, esp_lcd_touch_handle_t touch_handle) {
             if (touch_cnt > 0) {
                 touchPos.x = touch_x[0];
                 touchPos.y = touch_y[0];
+                // Store current touch position when touching
+                last_touch_pos = touchPos;
             }
         }
     }
+
+    bool is_touching = touch_cnt > 0;
 
     for (int i = 0; i < count; i++) {
         // Reset hover state
@@ -162,26 +367,54 @@ void update_tiles(Tile* tiles, int count, esp_lcd_touch_handle_t touch_handle) {
         }
 
         // Check touch hover
-        if (touchPos.x >= 0 && touchPos.y >= 0 && CheckCollisionPointRec(touchPos, tiles[i].rect)) {
+        if (is_touching && CheckCollisionPointRec(touchPos, tiles[i].rect)) {
             tiles[i].isHovered = true;
         }
 
         // Check for tile selection (touch or mouse)
-        bool inputPressed = IsMouseButtonPressed(MOUSE_LEFT_BUTTON) || (touch_cnt > 0);
-        bool inputReleased = IsMouseButtonReleased(MOUSE_LEFT_BUTTON) || (touch_cnt == 0 && tiles[i].isPressed);
+        bool inputPressed = IsMouseButtonPressed(MOUSE_LEFT_BUTTON) || is_touching;
+
+        // Detect touch release: was touching but now not touching
+        bool touch_released = was_touching && !is_touching;
+        bool inputReleased = IsMouseButtonReleased(MOUSE_LEFT_BUTTON) || touch_released;
 
         if (tiles[i].isHovered && inputPressed) {
             tiles[i].isPressed = true;
             tiles[i].isSelected = true;
             tiles[i].selectionTime = GetTime();
             tiles[i].selectionAnimation = 0.0f;
-            ESP_LOGI(TAG, "Tile selected: %s", tiles[i].label);
+            selected_tile_index = i;  // Store which tile is being pressed
+            ESP_LOGI(TAG, "Tile selected: %s (touch: %s, mouse: %s)",
+                    tiles[i].label, is_touching ? "yes" : "no",
+                    IsMouseButtonPressed(MOUSE_LEFT_BUTTON) ? "yes" : "no");
         } else if (inputReleased) {
+            if (tiles[i].isPressed) {
+                ESP_LOGI(TAG, "Tile released: %s", tiles[i].label);
+            }
             tiles[i].isPressed = false;
 
             // Handle OTA switching when tile is released (click/touch complete)
-            if (tiles[i].isHovered && tiles[i].isSelected) {
+            // For touch: use the stored pressed tile index and last touch position
+            // For mouse: use current hover state
+            bool should_trigger_ota = false;
+
+            if (touch_released && selected_tile_index == i) {
+                // Touch release on the same tile that was pressed
+                should_trigger_ota = tiles[i].isSelected;
+                ESP_LOGI(TAG, "Touch release on tile %d - should_trigger_ota: %s", i, should_trigger_ota ? "true" : "false");
+            } else if (!touch_released && tiles[i].isHovered && tiles[i].isSelected) {
+                // Mouse release on hovered tile
+                should_trigger_ota = true;
+            }
+
+            ESP_LOGI(TAG, "Checking OTA switch - tile: %d, isHovered: %s, isSelected: %s, should_trigger_ota: %s, otaIndex: %d",
+                    i, tiles[i].isHovered ? "true" : "false", tiles[i].isSelected ? "true" : "false",
+                    should_trigger_ota ? "true" : "false", tiles[i].otaIndex);
+
+            if (should_trigger_ota) {
                 int64_t current_time = esp_timer_get_time();
+                ESP_LOGI(TAG, "Release conditions met - current_time: %lld, last_selection_time: %lld",
+                        current_time, last_selection_time);
 
                 // Debounce - prevent multiple rapid selections (500ms debounce)
                 if (current_time - last_selection_time > 500000) {
@@ -196,8 +429,16 @@ void update_tiles(Tile* tiles, int count, esp_lcd_touch_handle_t touch_handle) {
                         // This is the info tile
                         show_bootloader_info();
                     }
+                } else {
+                    ESP_LOGI(TAG, "Debounce blocked - time since last: %lld us",
+                            current_time - last_selection_time);
                 }
             }
+        }
+
+        // Clear pressed tile index if this tile was released
+        if (inputReleased && selected_tile_index == i) {
+            selected_tile_index = -1;
         }
 
         // Update selection animation
@@ -208,6 +449,9 @@ void update_tiles(Tile* tiles, int count, esp_lcd_touch_handle_t touch_handle) {
             }
         }
     }
+
+    // Update touch state for next frame
+    was_touching = is_touching;
 }
 
 // Draw a single tile with selection effects
@@ -399,61 +643,83 @@ void raylib_task(void *pvParameter)
         // Begin drawing
         BeginDrawing();
 
-        // Dynamic background color based on animation
-        Color bgColor = (Color){
-            (unsigned char)(20 + (sinf(frameCounter * 0.01f) * 15 + 15)),
-            (unsigned char)(30 + (cosf(frameCounter * 0.015f) * 15 + 15)),
-            (unsigned char)(50 + (sinf(frameCounter * 0.02f) * 20 + 20)),
-            255
-        };
-        ClearBackground(bgColor);
+        // State-based rendering
+        if (current_boot_state == BOOT_STATE_BOOTING) {
+            // Draw booting screen with animation
+            draw_booting_screen(screenWidth, screenHeight, booting_animation_time);
+            booting_animation_time++;
+        } else if (current_boot_state == BOOT_STATE_ERROR) {
+            // Draw error screen with restart button
+            bool restart_requested = draw_error_screen(screenWidth, screenHeight, touch_handle);
+            if (restart_requested) {
+                ESP_LOGI(TAG, "Restart requested by user - resetting to selection mode");
+                current_boot_state = BOOT_STATE_SELECTING;
+                selected_tile_index = -1;
+                booting_animation_time = 0;
 
-        // Draw all tiles
-        for (int i = 0; i < TILE_COUNT; i++) {
-            draw_tile(&tiles[i]);
-        }
-
-        // Draw bouncing square with vibrant colors
-        Color ballColor = (Color){
-            (unsigned char)(sinf((frameCounter * 0.05f) + hueShift * 0.0174f) * 127 + 128),
-            (unsigned char)(sinf((frameCounter * 0.05f + 2.094f) + hueShift * 0.0174f) * 127 + 128),
-            (unsigned char)(sinf((frameCounter * 0.05f + 4.189f) + hueShift * 0.0174f) * 127 + 128),
-            255
-        };
-
-        DrawRectangle(ballX - ballSize/2, ballY - ballSize/2, ballSize, ballSize, ballColor);
-        DrawRectangleLinesEx((Rectangle){ballX - ballSize/2, ballY - ballSize/2, ballSize, ballSize}, 2, WHITE);
-
-        // Draw title
-        const char *title = "GUI Framework Selector";
-        int titleFontSize = 20;
-        int titleWidth = MeasureText(title, titleFontSize);
-        int titleX = (screenWidth - titleWidth) / 2;
-        DrawText(title, titleX, 10, titleFontSize, WHITE);
-
-        // Draw debug info (small text in corner)
-        char debugText[64];
-        snprintf(debugText, sizeof(debugText), "FPS: %d", GetFPS());
-        DrawText(debugText, 5, screenHeight - 40, 10, WHITE);
-
-        // Draw touch indicator
-        uint16_t touch_x[1] = {0};
-        uint16_t touch_y[1] = {0};
-        uint16_t touch_strength[1] = {0};
-        uint8_t touch_cnt = 0;
-        if (touch_handle && esp_lcd_touch_read_data(touch_handle) == ESP_OK) {
-            esp_lcd_touch_get_coordinates(touch_handle, touch_x, touch_y, touch_strength, &touch_cnt, 1);
-        }
-
-        if (touch_cnt > 0) {
-            snprintf(debugText, sizeof(debugText), "Touch: %d at (%d,%d)", touch_cnt, touch_x[0], touch_y[0]);
-            DrawText(debugText, 5, screenHeight - 25, 10, GREEN);
-
-            // Draw visual touch indicator
-            DrawCircleV((Vector2){touch_x[0], touch_y[0]}, 10, (Color){0, 255, 0, 100});
-            DrawCircleV((Vector2){touch_x[0], touch_y[0]}, 5, (Color){0, 255, 0, 200});
+                // Clear any pending touch inputs
+                if (touch_handle) {
+                    esp_lcd_touch_read_data(touch_handle);
+                }
+            }
         } else {
-            DrawText("No touch", 5, screenHeight - 25, 10, GRAY);
+            // Draw normal selection interface
+            // Dynamic background color based on animation
+            Color bgColor = (Color){
+                (unsigned char)(20 + (sinf(frameCounter * 0.01f) * 15 + 15)),
+                (unsigned char)(30 + (cosf(frameCounter * 0.015f) * 15 + 15)),
+                (unsigned char)(50 + (sinf(frameCounter * 0.02f) * 20 + 20)),
+                255
+            };
+            ClearBackground(bgColor);
+
+            // Draw all tiles
+            for (int i = 0; i < TILE_COUNT; i++) {
+                draw_tile(&tiles[i]);
+            }
+
+            // Draw bouncing square with vibrant colors
+            Color ballColor = (Color){
+                (unsigned char)(sinf((frameCounter * 0.05f) + hueShift * 0.0174f) * 127 + 128),
+                (unsigned char)(sinf((frameCounter * 0.05f + 2.094f) + hueShift * 0.0174f) * 127 + 128),
+                (unsigned char)(sinf((frameCounter * 0.05f + 4.189f) + hueShift * 0.0174f) * 127 + 128),
+                255
+            };
+
+            DrawRectangle(ballX - ballSize/2, ballY - ballSize/2, ballSize, ballSize, ballColor);
+            DrawRectangleLinesEx((Rectangle){ballX - ballSize/2, ballY - ballSize/2, ballSize, ballSize}, 2, WHITE);
+
+            // Draw title
+            const char *title = "GUI Framework Selector";
+            int titleFontSize = 20;
+            int titleWidth = MeasureText(title, titleFontSize);
+            int titleX = (screenWidth - titleWidth) / 2;
+            DrawText(title, titleX, 10, titleFontSize, WHITE);
+
+            // Draw debug info (small text in corner)
+            char debugText[64];
+            //snprintf(debugText, sizeof(debugText), "FPS: %d", GetFPS());
+            //DrawText(debugText, 5, screenHeight - 40, 10, WHITE);
+
+            // Draw touch indicator
+            uint16_t touch_x[1] = {0};
+            uint16_t touch_y[1] = {0};
+            uint16_t touch_strength[1] = {0};
+            uint8_t touch_cnt = 0;
+            if (touch_handle && esp_lcd_touch_read_data(touch_handle) == ESP_OK) {
+                esp_lcd_touch_get_coordinates(touch_handle, touch_x, touch_y, touch_strength, &touch_cnt, 1);
+            }
+
+            if (touch_cnt > 0) {
+                snprintf(debugText, sizeof(debugText), "Touch: %d at (%d,%d)", touch_cnt, touch_x[0], touch_y[0]);
+                DrawText(debugText, 5, screenHeight - 25, 10, GREEN);
+
+                // Draw visual touch indicator
+                DrawCircleV((Vector2){touch_x[0], touch_y[0]}, 10, (Color){0, 255, 0, 100});
+                DrawCircleV((Vector2){touch_x[0], touch_y[0]}, 5, (Color){0, 255, 0, 200});
+            } else {
+                DrawText("No touch", 5, screenHeight - 25, 10, GRAY);
+            }
         }
 
         // End drawing
