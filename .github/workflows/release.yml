@@ -102,7 +102,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup ESP-IDF and gh CLI
-        uses: espressif/esp-idf-action@v1.2.0
+        uses: espressif/esp-idf-ci-action@v1.2.0
         with:
           esp-idf-version: v5.5
 
