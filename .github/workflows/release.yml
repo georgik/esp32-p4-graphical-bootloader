@@ -20,37 +20,76 @@ env:
 jobs:
   create-release:
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      release_id: ${{ steps.create_release.outputs.id }}
     steps:
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.event.inputs.version }}
-          release_name: ESP32-P4 Graphical Bootloader ${{ github.event.inputs.version }}
-          body: |
-            ## ESP32-P4 Graphical Bootloader Release ${{ github.event.inputs.version }}
+      - name: Checkout
+        uses: actions/checkout@v4
 
-            ### Flashing Instructions
-            1. **Web Flashing**: Visit https://georgik.github.io/esp32-p4-graphical-bootloader/
-            2. **Manual Flashing**: Download the `bootloader-${{ github.event.inputs.version }}-${{ env.BOARD }}.bin` file and flash:
-               ```bash
-               python -m esptool --chip esp32p4 write_flash 0x0 bootloader-${{ github.event.inputs.version }}-${{ env.BOARD }}.bin
-               ```
+      - name: Setup gh CLI
+        run: |
+          # Install gh CLI if not present
+          if ! command -v gh &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
 
+          # Authenticate with GitHub
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
 
-            ### Supported Hardware
-            - ESP32-P4 Function EV Board
-            - Touchscreen display
-            - 16MB Flash (recommended)
+      - name: Create or Update Release
+        run: |
+          RELEASE_NOTES=$(cat <<'EOF'
+          ## ESP32-P4 Graphical Bootloader Release ${{ github.event.inputs.version }}
 
-            For detailed documentation, visit: https://github.com/georgik/esp32-p4-graphical-bootloader
-          draft: false
-          prerelease: ${{ github.event.inputs.prerelease }}
+          ### Features
+          - ✅ Touch-enabled GUI bootloader with Raylib graphics
+          - ✅ RTC-based partition switching (factory-first design)
+          - ✅ JSON configuration management with SPIFFS storage
+          - ✅ Dynamic partition mapping (supports up to 16 OTA partitions)
+          - ✅ Web-based flashing via ESP-Launchpad
+
+          ### Flashing Instructions
+          1. **Web Flashing**: Visit https://georgik.github.io/esp32-p4-graphical-bootloader/
+          2. **Manual Flashing**: Download the release files and use the provided flashing script
+          3. **Command Line**: `gh release download ${{ github.event.inputs.version }} && ./flash-esp32_p4_function_ev_board.sh`
+
+          ### Partition Layout
+          - **Factory App**: 1MB (GUI bootloader)
+          - **OTA_0**: 4.8MB (largest OTA slot)
+          - **OTA_1**: 4MB
+          - **OTA_2**: 4MB
+          - **Config Storage**: 2MB SPIFFS for JSON configs and icons
+          - **NVS**: 32KB
+          - **OTA Data**: 8KB
+
+          ### Supported Hardware
+          - ESP32-P4 Function EV Board
+          - Touchscreen display
+          - 16MB Flash (recommended)
+
+          For detailed documentation, visit: https://github.com/georgik/esp32-p4-graphical-bootloader
+          EOF
+          )
+
+          # Create release flags
+          RELEASE_FLAGS=""
+          if [[ "${{ github.event.inputs.prerelease }}" == "true" ]]; then
+            RELEASE_FLAGS="--prerelease"
+          fi
+
+          # Check if release exists and create or update accordingly
+          if gh release view "${{ github.event.inputs.version }}" > /dev/null 2>&1; then
+            echo "Release exists, updating..."
+            gh release edit "${{ github.event.inputs.version }}" \
+              --title "ESP32-P4 Graphical Bootloader ${{ github.event.inputs.version }}" \
+              --notes "$RELEASE_NOTES" \
+              $RELEASE_FLAGS
+          else
+            echo "Creating new release..."
+            gh release create "${{ github.event.inputs.version }}" \
+              --title "ESP32-P4 Graphical Bootloader ${{ github.event.inputs.version }}" \
+              --notes "$RELEASE_NOTES" \
+              $RELEASE_FLAGS
+          fi
 
   build-and-upload:
     needs: create-release
@@ -62,10 +101,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup ESP-IDF
+      - name: Setup ESP-IDF and gh CLI
         uses: espressif/esp-idf-action@v1.2.0
         with:
           esp-idf-version: v5.5
+
+      - name: Setup gh CLI for release uploads
+        run: |
+          # Install gh CLI if not present
+          if ! command -v gh &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
+
+          # Authenticate with GitHub
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
 
       - name: Build Project
         run: |
@@ -93,14 +143,12 @@ jobs:
             partitions.csv \
             README.md
 
-          # Generate flashing script
+          # Generate flashing script for standard ESP-IDF flashing
           cat > firmware/flash-${{ matrix.board }}.sh << 'EOF'
           #!/bin/bash
           echo "Flashing ESP32-P4 Graphical Bootloader"
           echo "======================================"
-          echo ""
-          echo "Connect your ESP32-P4 board and press any key to continue..."
-          read -n 1
+          echo "Version: ${{ github.event.inputs.version }}"
           echo ""
 
           # Detect port automatically
@@ -113,77 +161,88 @@ jobs:
           echo "Using: $ESP_TOOL"
           echo ""
 
-          # Flash the firmware
-          $ESP_TOOL --chip esp32p4 write_flash 0x0 bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}.bin
+          # Detect port (try common ports)
+          PORTS=("/dev/ttyUSB0" "/dev/ttyUSB1" "/dev/ttyACM0" "/dev/ttyACM1" "/dev/cu.usbserial-*" "/dev/cu.usbmodem-*")
+          DETECTED_PORT=""
 
-          if [ $? -eq 0 ]; then
+          for port in "\${PORTS[@]}"; do
+              if ls \$port &> /dev/null; then
+                  DETECTED_PORT=\$(ls \$port 2>/dev/null | head -1)
+                  break
+              fi
+          done
+
+          if [ -n "\$DETECTED_PORT" ]; then
+              echo "🔌 Detected port: \$DETECTED_PORT"
+              PORT_ARG="--port \$DETECTED_PORT"
+          else
+              echo "⚠️  No port detected, you may need to specify it manually"
+              PORT_ARG=""
+          fi
+
+          echo ""
+          echo "🚀 Ready to flash. Press Enter to continue or Ctrl+C to cancel..."
+          read -r
+
+          echo "Flashing bootloader components..."
+          $ESP_TOOL --chip $TARGET \$PORT_ARG write_flash \
+            0x2000 bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-bootloader.bin \
+            0x10000 bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-partition-table.bin \
+            0x20000 bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-factory.bin \
+            0x128000 bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-ota-data.bin
+
+          if [ \$? -eq 0 ]; then
               echo ""
               echo "✅ Flashing completed successfully!"
               echo "🚀 Your ESP32-P4 should now boot into the graphical bootloader"
+              echo ""
+              echo "🌐 Web interface: https://georgik.github.io/esp32-p4-graphical-bootloader/"
+              echo "📖 Documentation: https://github.com/georgik/esp32-p4-graphical-bootloader"
           else
               echo ""
-              echo "❌ Flashing failed. Please check your connection and try again."
+              echo "❌ Flashing failed!"
+              echo "💡 Please check:"
+              echo "   - Device is connected properly"
+              echo "   - Device is in flash mode (hold BOOT button while pressing RESET)"
+              echo "   - No other processes are using the serial port"
               exit 1
           fi
           EOF
           chmod +x firmware/flash-${{ matrix.board }}.sh
 
-      - name: Upload Release Asset - Bootloader Binary
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-bootloader.bin
-          asset_name: bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-bootloader.bin
-          asset_content_type: application/octet-stream
+      - name: Upload Release Assets using gh
+        run: |
+          # Upload all release assets using gh CLI
+          echo "Uploading release assets..."
 
-      - name: Upload Release Asset - Partition Table
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-partition-table.bin
-          asset_name: bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-partition-table.bin
-          asset_content_type: application/octet-stream
+          # Upload bootloader binary
+          gh release upload "${{ github.event.inputs.version }}" \
+            firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-bootloader.bin \
+            --clobber
 
-      - name: Upload Release Asset - Factory Application
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-factory.bin
-          asset_name: bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-factory.bin
-          asset_content_type: application/octet-stream
+          # Upload partition table
+          gh release upload "${{ github.event.inputs.version }}" \
+            firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-partition-table.bin \
+            --clobber
 
-      - name: Upload Release Asset - OTA Data
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-ota-data.bin
-          asset_name: bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-ota-data.bin
-          asset_content_type: application/octet-stream
+          # Upload factory application
+          gh release upload "${{ github.event.inputs.version }}" \
+            firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-factory.bin \
+            --clobber
 
-      - name: Upload Release Asset - Package
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}.tar.gz
-          asset_name: bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}.tar.gz
-          asset_content_type: application/gzip
+          # Upload OTA data
+          gh release upload "${{ github.event.inputs.version }}" \
+            firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-ota-data.bin \
+            --clobber
 
-      - name: Upload Release Asset - Flash Script
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: firmware/flash-${{ matrix.board }}.sh
-          asset_name: flash-${{ matrix.board }}.sh
-          asset_content_type: application/x-sh
+          # Upload package
+          gh release upload "${{ github.event.inputs.version }}" \
+            firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}.tar.gz \
+            --clobber
+
+          # Upload flash script
+          gh release upload "${{ github.event.inputs.version }}" \
+            firmware/flash-${{ matrix.board }}.sh \
+            --clobber
+
+          echo "All release assets uploaded successfully!"
