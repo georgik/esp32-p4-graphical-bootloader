@@ -50,39 +50,36 @@ jobs:
 
             # Download bootloader binary
             gh release download "$LATEST_RELEASE" \
-              --pattern "*bootloader-esp32_p4_function_ev_board-bootloader.bin" \
+              --pattern "*bootloader-${LATEST_RELEASE}-esp32_p4_function_ev_board-bootloader.bin" \
               --dir firmware/ \
               --clobber
-
-            # Rename to expected filename for ESP-Launchpad
-            mv firmware/bootloader-*-bootloader.bin firmware/bootloader-latest-esp32_p4_function_ev_board-bootloader.bin 2>/dev/null || true
 
             # Download partition table
             gh release download "$LATEST_RELEASE" \
-              --pattern "*bootloader-esp32_p4_function_ev_board-partition-table.bin" \
+              --pattern "*bootloader-${LATEST_RELEASE}-esp32_p4_function_ev_board-partition-table.bin" \
               --dir firmware/ \
               --clobber
-
-            # Rename to expected filename for ESP-Launchpad
-            mv firmware/bootloader-*-partition-table.bin firmware/bootloader-latest-esp32_p4_function_ev_board-partition-table.bin 2>/dev/null || true
 
             # Download factory app
             gh release download "$LATEST_RELEASE" \
-              --pattern "*bootloader-esp32_p4_function_ev_board-factory.bin" \
+              --pattern "*bootloader-${LATEST_RELEASE}-esp32_p4_function_ev_board-factory.bin" \
               --dir firmware/ \
               --clobber
-
-            # Rename to expected filename for ESP-Launchpad
-            mv firmware/bootloader-*-factory.bin firmware/bootloader-latest-esp32_p4_function_ev_board-factory.bin 2>/dev/null || true
 
             # Download OTA data
             gh release download "$LATEST_RELEASE" \
-              --pattern "*bootloader-esp32_p4_function_ev_board-ota-data.bin" \
+              --pattern "*bootloader-${LATEST_RELEASE}-esp32_p4_function_ev_board-ota-data.bin" \
               --dir firmware/ \
               --clobber
 
-            # Rename to expected filename for ESP-Launchpad
-            mv firmware/bootloader-*-ota-data.bin firmware/bootloader-latest-esp32_p4_function_ev_board-ota-data.bin 2>/dev/null || true
+            # Rename files to expected ESP-Launchpad names (remove version from filename)
+            for file in firmware/bootloader-${LATEST_RELEASE}-esp32_p4_function_ev_board-*.bin; do
+              if [ -f "$file" ]; then
+                new_name=$(echo "$file" | sed "s/bootloader-${LATEST_RELEASE}-esp32_p4_function_ev_board-/bootloader-latest-esp32_p4_function_ev_board-/")
+                mv "$file" "$new_name"
+                echo "Renamed: $(basename "$file") -> $(basename "$new_name")"
+              fi
+            done
           else
             echo "No release found, creating placeholder files"
             mkdir -p firmware
