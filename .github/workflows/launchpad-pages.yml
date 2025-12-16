@@ -1,13 +1,6 @@
 name: Deploy ESP Launchpad to Pages
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - 'launchpad/**'
-      - '.github/workflows/launchpad-pages.yml'
-  release:
-    types: [published]
   workflow_dispatch:
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
