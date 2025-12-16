@@ -40,13 +40,6 @@ jobs:
           RELEASE_NOTES=$(cat <<'EOF'
           ## ESP32-P4 Graphical Bootloader Release ${{ github.event.inputs.version }}
 
-          ### Features
-          - ✅ Touch-enabled GUI bootloader with Raylib graphics
-          - ✅ RTC-based partition switching (factory-first design)
-          - ✅ JSON configuration management with SPIFFS storage
-          - ✅ Dynamic partition mapping (supports up to 16 OTA partitions)
-          - ✅ Web-based flashing via ESP-Launchpad
-
           ### Flashing Instructions
           1. **Web Flashing**: Visit https://georgik.github.io/esp32-p4-graphical-bootloader/
           2. **Manual Flashing**: Download the release files and use the provided flashing script

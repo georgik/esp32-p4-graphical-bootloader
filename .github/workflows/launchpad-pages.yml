@@ -23,36 +23,83 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Fetch full history for version info
 
-      - name: Setup ESP-IDF
-        uses: espressif/esp-idf-action@v2
-        with:
-          esp-idf-version: v5.5
+      - name: Setup gh CLI
+        run: |
+          # Install gh CLI if not present
+          if ! command -v gh &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
+
+          # Authenticate with GitHub
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
 
       - name: Download Latest Release Firmware
         run: |
-          # Get latest release tag
-          LATEST_RELEASE=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest | grep 'tag_name' | cut -d '"' -f 4)
+          # Get latest release tag using gh CLI
+          LATEST_RELEASE=$(gh release view --json tagName --jq '.tagName' | tr -d '"')
           echo "Latest release: $LATEST_RELEASE"
 
           # Create firmware directory
           mkdir -p firmware
 
-          # Download all firmware assets from latest release
+          # Download all firmware assets from latest release using gh CLI
           if [ "$LATEST_RELEASE" != "" ]; then
-            curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest \
-              | grep "browser_download_url.*esp32_p4_function_ev_board.bin" \
-              | cut -d '"' -f 4 \
-              | xargs -n 1 curl -L -o firmware/bootloader-latest-esp32_p4_function_ev_board.bin
+            echo "Downloading firmware assets from release $LATEST_RELEASE"
+
+            # Download bootloader binary
+            gh release download "$LATEST_RELEASE" \
+              --pattern "*bootloader-esp32_p4_function_ev_board-bootloader.bin" \
+              --dir firmware/ \
+              --clobber
+
+            # Rename to expected filename for ESP-Launchpad
+            mv firmware/bootloader-*-bootloader.bin firmware/bootloader-latest-esp32_p4_function_ev_board-bootloader.bin 2>/dev/null || true
+
+            # Download partition table
+            gh release download "$LATEST_RELEASE" \
+              --pattern "*bootloader-esp32_p4_function_ev_board-partition-table.bin" \
+              --dir firmware/ \
+              --clobber
+
+            # Rename to expected filename for ESP-Launchpad
+            mv firmware/bootloader-*-partition-table.bin firmware/bootloader-latest-esp32_p4_function_ev_board-partition-table.bin 2>/dev/null || true
+
+            # Download factory app
+            gh release download "$LATEST_RELEASE" \
+              --pattern "*bootloader-esp32_p4_function_ev_board-factory.bin" \
+              --dir firmware/ \
+              --clobber
+
+            # Rename to expected filename for ESP-Launchpad
+            mv firmware/bootloader-*-factory.bin firmware/bootloader-latest-esp32_p4_function_ev_board-factory.bin 2>/dev/null || true
+
+            # Download OTA data
+            gh release download "$LATEST_RELEASE" \
+              --pattern "*bootloader-esp32_p4_function_ev_board-ota-data.bin" \
+              --dir firmware/ \
+              --clobber
+
+            # Rename to expected filename for ESP-Launchpad
+            mv firmware/bootloader-*-ota-data.bin firmware/bootloader-latest-esp32_p4_function_ev_board-ota-data.bin 2>/dev/null || true
+          else
+            echo "No release found, creating placeholder files"
+            mkdir -p firmware
+            echo "No release firmware available yet" > firmware/bootloader-latest-esp32_p4_function_ev_board-bootloader.bin
           fi
 
-          # If no release found, create a placeholder
-          if [ ! -f "firmware/bootloader-latest-esp32_p4_function_ev_board.bin" ]; then
-            echo "No firmware found, creating placeholder"
-            echo "No release firmware available yet" > firmware/bootloader-latest-esp32_p4_function_ev_board.bin
-          fi
+      - name: Verify Downloaded Files
+        run: |
+          echo "Verifying downloaded firmware files:"
+          ls -la firmware/
+          echo ""
+          echo "File sizes:"
+          for file in firmware/bootloader-latest-*.bin; do
+            if [ -f "$file" ]; then
+              echo "$(basename "$file"): $(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null) bytes"
+            fi
+          done
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
