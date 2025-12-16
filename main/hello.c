@@ -11,6 +11,7 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "bootloader_api.h"
 
 #define TAG "RaylibDemo"
 #define RAYLIB_TASK_STACK_SIZE (128 * 1024)  // 128KB stack for software renderer
@@ -59,13 +60,13 @@ static const char* get_app_label_by_index(int app_index) {
     return "Unknown";
 }
 
-// OTA switching function - similar to the LVGL bootloader
+// OTA switching function using custom bootloader API
 static void ota_switch_to_app(int app_index) {
     ESP_LOGI(TAG, "Attempting to switch to OTA partition %d", app_index);
 
-    // Check if we have a valid app index
-    if (app_index < 0 || app_index > 7) {
-        ESP_LOGE(TAG, "Invalid app_index %d, must be between 0-7", app_index);
+    // Check if we have a valid app index (0-6 for OTA partitions, 7 is info)
+    if (app_index < 0 || app_index > 6) {
+        ESP_LOGE(TAG, "Invalid app_index %d, must be between 0-6 for OTA partitions", app_index);
         current_boot_state = BOOT_STATE_ERROR;
         return;
     }
@@ -77,51 +78,36 @@ static void ota_switch_to_app(int app_index) {
 
     ESP_LOGI(TAG, "Booting application: %s (OTA index: %d)", booting_app_name, app_index);
 
-    // Get the current running partition
-    const esp_partition_t *current_partition = esp_ota_get_running_partition();
-    if (current_partition) {
-        ESP_LOGI(TAG, "Current running partition: %s (subtype: %d)",
-                 current_partition->label ? current_partition->label : "unknown",
-                 current_partition->subtype);
+    // Map app_index to bootloader partition types
+    // app_index 0-2 map to OTA_0, OTA_1, and for simplicity we map others to OTA_0/OTA_1 alternately
+    boot_partition_type_t partition_type;
+    if (app_index == 0) {
+        partition_type = BOOT_PARTITION_OTA_0;
+    } else if (app_index == 1) {
+        partition_type = BOOT_PARTITION_OTA_1;
+    } else if (app_index % 2 == 0) {
+        partition_type = BOOT_PARTITION_OTA_0;
+    } else {
+        partition_type = BOOT_PARTITION_OTA_1;
     }
 
-    // Find the target OTA partition directly
-    esp_partition_subtype_t target_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_0 + app_index;
-    const esp_partition_t *ota_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, target_subtype, NULL);
-
-    if (!ota_partition) {
-        ESP_LOGE(TAG, "Failed to find OTA partition %d (subtype %d)", app_index, target_subtype);
-        current_boot_state = BOOT_STATE_ERROR;
-        return;
-    }
-
-    // Skip if this is the currently running partition
-    if (current_partition && ota_partition == current_partition) {
-        ESP_LOGI(TAG, "Target partition %s is already running",
-                 ota_partition->label ? ota_partition->label : "unknown");
-        current_boot_state = BOOT_STATE_ERROR;
-        return;
-    }
-
-    ESP_LOGI(TAG, "Found target OTA partition: %s (subtype: %d, offset: 0x%x)",
-             ota_partition->label ? ota_partition->label : "unknown",
-             ota_partition->subtype, ota_partition->address);
+    ESP_LOGI(TAG, "Requesting boot from partition type: %d", partition_type);
 
     // Add delay to show booting animation
     vTaskDelay(pdMS_TO_TICKS(2000));
 
-    // Set the boot partition to the selected OTA partition
-    esp_err_t err = esp_ota_set_boot_partition(ota_partition);
+    // Request next boot using custom bootloader API
+    esp_err_t err = bootloader_request_next_boot(partition_type);
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Successfully set boot partition to %s (index %d)",
-                 ota_partition->label ? ota_partition->label : "unknown", app_index);
+        ESP_LOGI(TAG, "Successfully requested boot to partition type %d for app %s",
+                 partition_type, booting_app_name);
 
         // Add a small delay to allow logging to complete
         vTaskDelay(pdMS_TO_TICKS(200));
-        ESP_LOGI(TAG, "Restarting now to boot from the new partition...");
+        ESP_LOGI(TAG, "Restarting now to boot from the custom bootloader...");
         esp_restart();
     } else {
-        ESP_LOGE(TAG, "Failed to set boot partition: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to request next boot: %s", esp_err_to_name(err));
         current_boot_state = BOOT_STATE_ERROR;
     }
 }
