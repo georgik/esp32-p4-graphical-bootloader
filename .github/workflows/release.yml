@@ -101,7 +101,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup ESP-IDF and gh CLI
+      - name: Build ESP-IDF project
         uses: espressif/esp-idf-ci-action@v1.2.0
         with:
           target: 'esp32p4'
@@ -120,12 +120,6 @@ jobs:
 
       - name: Build Project
         run: |
-          # Clean previous builds
-          idf.py fullclean
-
-          # Build the project
-          idf.py build
-
           # Create firmware directory
           mkdir -p firmware
 
@@ -143,73 +137,6 @@ jobs:
             build/ota_data_initial.bin \
             partitions.csv \
             README.md
-
-          # Generate flashing script for standard ESP-IDF flashing
-          cat > firmware/flash-${{ matrix.board }}.sh << 'EOF'
-          #!/bin/bash
-          echo "Flashing ESP32-P4 Graphical Bootloader"
-          echo "======================================"
-          echo "Version: ${{ github.event.inputs.version }}"
-          echo ""
-
-          # Detect port automatically
-          if command -v esptool.py &> /dev/null; then
-              ESP_TOOL="esptool.py"
-          else
-              ESP_TOOL="python -m esptool"
-          fi
-
-          echo "Using: $ESP_TOOL"
-          echo ""
-
-          # Detect port (try common ports)
-          PORTS=("/dev/ttyUSB0" "/dev/ttyUSB1" "/dev/ttyACM0" "/dev/ttyACM1" "/dev/cu.usbserial-*" "/dev/cu.usbmodem-*")
-          DETECTED_PORT=""
-
-          for port in "\${PORTS[@]}"; do
-              if ls \$port &> /dev/null; then
-                  DETECTED_PORT=\$(ls \$port 2>/dev/null | head -1)
-                  break
-              fi
-          done
-
-          if [ -n "\$DETECTED_PORT" ]; then
-              echo "🔌 Detected port: \$DETECTED_PORT"
-              PORT_ARG="--port \$DETECTED_PORT"
-          else
-              echo "⚠️  No port detected, you may need to specify it manually"
-              PORT_ARG=""
-          fi
-
-          echo ""
-          echo "🚀 Ready to flash. Press Enter to continue or Ctrl+C to cancel..."
-          read -r
-
-          echo "Flashing bootloader components..."
-          $ESP_TOOL --chip $TARGET \$PORT_ARG write_flash \
-            0x2000 bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-bootloader.bin \
-            0x10000 bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-partition-table.bin \
-            0x20000 bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-factory.bin \
-            0x128000 bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-ota-data.bin
-
-          if [ \$? -eq 0 ]; then
-              echo ""
-              echo "✅ Flashing completed successfully!"
-              echo "🚀 Your ESP32-P4 should now boot into the graphical bootloader"
-              echo ""
-              echo "🌐 Web interface: https://georgik.github.io/esp32-p4-graphical-bootloader/"
-              echo "📖 Documentation: https://github.com/georgik/esp32-p4-graphical-bootloader"
-          else
-              echo ""
-              echo "❌ Flashing failed!"
-              echo "💡 Please check:"
-              echo "   - Device is connected properly"
-              echo "   - Device is in flash mode (hold BOOT button while pressing RESET)"
-              echo "   - No other processes are using the serial port"
-              exit 1
-          fi
-          EOF
-          chmod +x firmware/flash-${{ matrix.board }}.sh
 
       - name: Upload Release Assets using gh
         run: |
@@ -239,11 +166,6 @@ jobs:
           # Upload package
           gh release upload "${{ github.event.inputs.version }}" \
             firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}.tar.gz \
-            --clobber
-
-          # Upload flash script
-          gh release upload "${{ github.event.inputs.version }}" \
-            firmware/flash-${{ matrix.board }}.sh \
             --clobber
 
           echo "All release assets uploaded successfully!"
