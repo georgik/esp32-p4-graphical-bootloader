@@ -120,14 +120,12 @@ jobs:
           cp build/bootloader/bootloader.bin firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-bootloader.bin
           cp build/partition_table/partition-table.bin firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-partition-table.bin
           cp build/esp32_p4_graphical_bootloader.bin firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-factory.bin
-          cp build/ota_data_initial.bin firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-ota-data.bin
 
           # Create flashing package
           tar -czf firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}.tar.gz \
             build/bootloader/bootloader.bin \
             build/partition_table/partition-table.bin \
             build/esp32_p4_graphical_bootloader.bin \
-            build/ota_data_initial.bin \
             partitions.csv \
             README.md
 

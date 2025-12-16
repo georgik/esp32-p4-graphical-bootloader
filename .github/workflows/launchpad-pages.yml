@@ -74,12 +74,6 @@ jobs:
               --dir temp-launchpad/firmware/ \
               --clobber
 
-            # Download OTA data
-            gh release download "$LATEST_RELEASE" \
-              --pattern "*bootloader-${LATEST_RELEASE}-esp32_p4_function_ev_board-ota-data.bin" \
-              --dir temp-launchpad/firmware/ \
-              --clobber
-
             # Rename files to expected ESP-Launchpad names (remove version from filename)
             cd temp-launchpad/firmware
             for file in bootloader-${LATEST_RELEASE}-esp32_p4_function_ev_board-*.bin; do
