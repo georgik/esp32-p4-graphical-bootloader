@@ -1,8 +1,5 @@
 esp_toml_version = 1.0
 
-# Enable multipart binary flashing (required for multiple binaries)
-multipart = true
-
 # Base URL where firmware binaries are hosted
 firmware_images_url = "https://georgik.github.io/esp32-p4-graphical-bootloader/firmware/"
 
@@ -16,19 +13,9 @@ chipsets = ["ESP32-P4"]
 # Development kits
 developKits.esp32-p4 = ["esp32-p4-function-ev-board"]
 
-# Firmware images for each board - use multipart format for separate ESP-IDF binaries
-# The image key must match the development kit name
-[image.esp32-p4-function-ev-board]
-parts = [
-    "bootloader-latest-esp32_p4_function_ev_board-bootloader.bin",
-    "bootloader-latest-esp32_p4_function_ev_board-partition-table.bin",
-    "bootloader-latest-esp32_p4_function_ev_board-factory.bin"
-]
-addresses = [
-    "0x2000",
-    "0x10000",
-    "0x20000"
-]
+# Firmware images for each board (using merged binaries)
+# Follows the same pattern as OpenTyrian project
+image.esp32-p4-function-ev-board = "bootloader-latest-esp32_p4_function_ev_board.bin"
 
 # Description
 description = "ESP32-P4 Graphical Bootloader - Touch-enabled GUI framework selection with RTC-based partition switching and JSON configuration management"

@@ -24,6 +24,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Build and Create Binaries
+        uses: espressif/esp-idf-ci-action@v1.1.0
+        with:
+          esp_idf_version: latest
+          target: esp32p4
+          path: '.'
+          command: |
+            cp sdkconfig.defaults sdkconfig &&
+            idf.py build &&
+            cd build &&
+            # Copy individual binaries for manual flashing
+            cp bootloader/bootloader.bin ../bootloader-${{ github.event.inputs.version }}-esp32_p4_function_ev_board-bootloader.bin &&
+            cp partition_table/partition-table.bin ../bootloader-${{ github.event.inputs.version }}-esp32_p4_function_ev_board-partition-table.bin &&
+            cp esp32_p4_graphical_bootloader.bin ../bootloader-${{ github.event.inputs.version }}-esp32_p4_function_ev_board-factory.bin &&
+            # Create merged binary for ESP-Launchpad (without OTA data)
+            esptool.py --chip esp32p4 merge_bin -o ../bootloader-${{ github.event.inputs.version }}-esp32_p4_function_ev_board.bin \
+              0x2000 bootloader/bootloader.bin \
+              0x10000 partition_table/partition-table.bin \
+              0x20000 esp32_p4_graphical_bootloader.bin
+
       - name: Setup gh CLI
         run: |
           # Install gh CLI if not present

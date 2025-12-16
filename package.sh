@@ -34,7 +34,13 @@ echo "Copying binary files..."
 cp build/bootloader/bootloader.bin "$OUTPUT_DIR/bootloader-$VERSION-$BOARD-bootloader.bin"
 cp build/partition_table/partition-table.bin "$OUTPUT_DIR/bootloader-$VERSION-$BOARD-partition-table.bin"
 cp build/esp32_p4_graphical_bootloader.bin "$OUTPUT_DIR/bootloader-$VERSION-$BOARD-factory.bin"
-cp build/ota_data_initial.bin "$OUTPUT_DIR/bootloader-$VERSION-$BOARD-ota-data.bin"
+
+# Create merged binary for ESP-Launchpad (single file flashing)
+echo "Creating merged binary for ESP-Launchpad..."
+idf.py merge-bin -o "$OUTPUT_DIR/bootloader-$VERSION-$BOARD.bin" \
+  0x2000 build/bootloader/bootloader.bin \
+  0x10000 build/partition_table/partition-table.bin \
+  0x20000 build/esp32_p4_graphical_bootloader.bin
 
 # Copy additional files
 echo "Copying additional files..."
@@ -204,13 +210,13 @@ Board: $BOARD
 
 Package Contents:
 -----------------
+- bootloader-$VERSION-$BOARD.bin: Merged binary for ESP-Launchpad (bootloader + partition table + factory app)
 - bootloader-$VERSION-$BOARD-bootloader.bin: Custom bootloader with RTC support
 - bootloader-$VERSION-$BOARD-partition-table.bin: Partition table definition
 - bootloader-$VERSION-$BOARD-factory.bin: Factory GUI application
-- bootloader-$VERSION-$BOARD-ota-data.bin: OTA metadata
 - partitions.csv: Partition table definition (for reference)
-- flash-$BOARD.sh: Flashing script for Unix/Linux/macOS
-- flash-$BOARD.bat: Flashing script for Windows
+- flash-$BOARD.sh: Flashing script for Unix/Linux/macOS (separate binaries)
+- flash-$BOARD.bat: Flashing script for Windows (separate binaries)
 - MANIFEST.txt: This file
 
 Flashing Instructions:
@@ -254,12 +260,13 @@ echo "📦 Package created successfully!"
 echo ""
 echo "Files created:"
 echo "  - dist/bootloader-$VERSION-$BOARD.tar.gz (archive)"
+echo "  - dist/bootloader-$VERSION-$BOARD.bin (merged binary for ESP-Launchpad)"
 echo "  - dist/bootloader-$VERSION-$BOARD-bootloader.bin (custom bootloader)"
 echo "  - dist/bootloader-$VERSION-$BOARD-partition-table.bin (partition table)"
 echo "  - dist/bootloader-$VERSION-$BOARD-factory.bin (factory GUI app)"
-echo "  - dist/bootloader-$VERSION-$BOARD-ota-data.bin (OTA metadata)"
-echo "  - dist/flash-$BOARD.sh (Unix flashing script)"
-echo "  - dist/flash-$BOARD.bat (Windows flashing script)"
+echo "  - dist/flash-$BOARD.sh (Unix flashing script for separate binaries)"
+echo "  - dist/flash-$BOARD.bat (Windows flashing script for separate binaries)"
 echo "  - dist/MANIFEST.txt (package manifest)"
 echo ""
 echo "🚀 Ready for ESP-Launchpad distribution!"
+echo "🌐 ESP-Launchpad will use: bootloader-$VERSION-$BOARD.bin"
