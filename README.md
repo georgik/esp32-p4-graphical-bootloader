@@ -144,24 +144,73 @@ REG_WRITE(BOOT_REQUEST_RTC_REG, rtc_value);
 - Bootloader cannot depend on `app_update` component
 - Would require complex bootloader rebuild configuration
 
+## 🚀 Quick Start: Web Flashing
+
+**ESP-Launchpad Web Flasher**: Visit https://georgik.github.io/esp32-p4-graphical-bootloader/ for one-click web-based flashing!
+
+### Alternative: Manual Installation
+
+#### Automated Package (Recommended)
+```bash
+# Download latest release from GitHub
+wget https://github.com/georgik/esp32-p4-graphical-bootloader/releases/latest/download/bootloader-latest-esp32_p4_function_ev_board.tar.gz
+tar -xzf bootloader-latest-esp32_p4_function_ev_board.tar.gz
+
+# Flash using provided script
+./flash-esp32_p4_function_ev_board.sh
+```
+
+#### Manual Build
+```bash
+git clone https://github.com/georgik/esp32-p4-graphical-bootloader.git
+cd esp32-p4-graphical-bootloader
+
+# Build and package
+./package.sh v1.0.0
+cd dist
+./flash-esp32_p4_function_ev_board.sh
+```
+
 ## Prerequisites
 
-- ESP-IDF v5.5
+- **ESP-IDF v5.5** (for building from source)
+- **ESP32-P4 Function EV Board** with touchscreen
+- **16MB Flash** (recommended for optimal OTA storage)
 
-## Partition Layout
+## Architecture Overview
 
-The custom partition table supports factory-first boot behavior:
+This project implements a **three-stage boot architecture** with **RTC-based boot requests** and **dynamic partition mapping**:
+
+1. **Stage 1**: ESP-IDF bootloader (embedded in ROM)
+2. **Stage 2**: Custom bootloader with dynamic partition discovery
+3. **Stage 3**: Factory application with GUI framework selector
+
+### Key Features
+
+- **Touch-enabled GUI bootloader** with Raylib graphics
+- **Factory-first boot design** (always defaults to factory partition)
+- **RTC-based partition switching** (no flash wear, survives reboots)
+- **Dynamic partition mapping** (supports up to 16 OTA partitions)
+- **JSON configuration management** with SPIFFS storage
+- **Web-based flashing** via ESP-Launchpad
+- **CI/CD pipeline** for automated releases
+
+## 📊 Optimized Partition Layout
+
+The custom partition table is optimized for 16MB flash with large OTA slots:
 
 ```
-Offset      Size    Type      Purpose
-0x00000     64KB    bootloader Custom bootloader
-0x10000     4KB     partition Partition table
-0x20000     1MB     factory  Factory app (GUI selector) - DEFAULT
-0x120000    1MB     ota_0    OTA slot 0 (one-time boot)
-0x220000    1MB     ota_1    OTA slot 1 (one-time boot)
-0x320000    32KB    nvs      Non-volatile storage
-0x328000    8KB     otadata  OTA metadata (unused by our system)
-0x32a000    1MB     spiffs   File system
+Offset      Size     Type       Purpose
+0x00000     64KB     bootloader  Custom bootloader
+0x10000     4KB      partition   Partition table
+0x20000     1MB      factory     Factory app (GUI selector) - DEFAULT
+0x120000    32KB     nvs         Non-volatile storage
+0x128000    8KB      otadata     OTA metadata
+0x130000    2MB      spiffs      JSON configs, icons, OTA staging
+0x330000    4.8MB    ota_0       OTA slot 0 (largest for main apps)
+0x800000    4MB      ota_1       OTA slot 1
+0xC00000    4MB      ota_2       OTA slot 2
+            Total OTA: 12.8MB
 ```
 
 ## Build Configuration
@@ -207,20 +256,37 @@ idf_component_register(
 
 ## Usage
 
-### Building
+### Building from Source
 ```bash
-idf.py build
-```
+# Clone the repository
+git clone https://github.com/georgik/esp32-p4-graphical-bootloader.git
+cd esp32-p4-graphical-bootloader
 
-### Flashing
-```bash
+# Setup ESP-IDF environment
+source /path/to/esp-idf/export.sh
+
+# Build the project
+idf.py build
+
+# Create distribution package
+./package.sh v1.0.0
+
+# Or flash directly
 idf.py flash
 ```
 
-### Monitoring
+### Monitoring Output
 ```bash
 idf.py monitor
 ```
+
+### Web Flashing (ESP-Launchpad)
+Visit https://georgik.github.io/esp32-p4-graphical-bootloader/ for browser-based flashing!
+
+### Downloading Releases
+Pre-built binaries are available on GitHub:
+- **Latest Release**: https://github.com/georgik/esp32-p4-graphical-bootloader/releases/latest
+- **All Releases**: https://github.com/georgik/esp32-p4-graphical-bootloader/releases
 
 ## Boot Request API
 

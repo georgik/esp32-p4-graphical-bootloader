@@ -1,0 +1,36 @@
+esp_toml_version = 1.0
+
+# Base URL where firmware binaries are hosted
+firmware_images_url = "https://georgik.github.io/esp32-p4-graphical-bootloader/firmware/"
+
+# Applications available
+supported_apps = ["GraphicalBootloader"]
+
+[GraphicalBootloader]
+# Supported ESP32 chipsets
+chipsets = ["ESP32-P4"]
+
+# Development kits
+developKits.esp32-p4 = ["esp32-p4-function-ev-board"]
+
+# Firmware images for each board - use separate files for standard ESP-IDF approach
+image.esp32-p4-function-ev-board = [
+  { path = "bootloader-latest-esp32_p4_function_ev_board-bootloader.bin", offset = 0x2000 },
+  { path = "bootloader-latest-esp32_p4_function_ev_board-partition-table.bin", offset = 0x10000 },
+  { path = "bootloader-latest-esp32_p4_function_ev_board-factory.bin", offset = 0x20000 },
+  { path = "bootloader-latest-esp32_p4_function_ev_board-ota-data.bin", offset = 0x128000 }
+]
+
+# Description
+description = "ESP32-P4 Graphical Bootloader - Touch-enabled GUI framework selection with RTC-based partition switching and JSON configuration management"
+
+# Additional information
+readme.text = "https://raw.githubusercontent.com/georgik/esp32-p4-graphical-bootloader/main/README.md"
+
+# Console settings
+console_baudrate = 115200
+
+# Additional metadata
+homepage = "https://github.com/georgik/esp32-p4-graphical-bootloader"
+maintainer = "Georgik"
+license = "MIT"
