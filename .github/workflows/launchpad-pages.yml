@@ -101,10 +101,28 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
+      - name: Prepare Pages Directory
+        run: |
+          # Create a clean directory for GitHub Pages
+          mkdir -p pages
+
+          # Copy only the necessary files for ESP-Launchpad
+          cp index.html pages/
+          cp -r launchpad pages/
+          cp -r firmware pages/
+
+          # Copy README if it exists (for documentation)
+          if [ -f "README.md" ]; then
+            cp README.md pages/
+          fi
+
+          echo "Pages directory contents:"
+          ls -la pages/
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: '.'
+          path: './pages'
 
   # Deployment job
   deploy:
