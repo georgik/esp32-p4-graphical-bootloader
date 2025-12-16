@@ -4,21 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g., v1.0.0)'
+        description: 'Release version (e.g., v0.1.0)'
         required: true
-        type: string
+        default: 'v0.1.0'
       prerelease:
         description: 'Is this a prerelease?'
         required: true
         type: boolean
         default: true
 
-env:
-  TARGET: esp32p4
-  BOARD: esp32_p4_function_ev_board
-
 jobs:
-  create-release:
+  build-and-release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -55,33 +51,38 @@ jobs:
           # Authenticate with GitHub
           echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
 
-      - name: Create or Update Release
+      - name: Create Release Notes
         run: |
-          RELEASE_NOTES=$(cat <<'EOF'
-          ## ESP32-P4 Graphical Bootloader Release ${{ github.event.inputs.version }}
+          cat > RELEASE_NOTES.md << 'EOF'
+          # ESP32-P4 Graphical Bootloader ${{ github.event.inputs.version }}
 
-          ### Flashing Instructions
-          1. **Web Flashing**: Visit https://georgik.github.io/esp32-p4-graphical-bootloader/
-          2. **Manual Flashing**: Download the release files and use the provided flashing script
-          3. **Command Line**: `gh release download ${{ github.event.inputs.version }} && ./flash-esp32_p4_function_ev_board.sh`
+          ## Features
+          - Touch-enabled GUI bootloader with RTC-based partition switching
+          - Factory-first boot design with dynamic partition mapping
+          - JSON configuration management with SPIFFS storage
+          - Support for up to 16 OTA partitions
+          - ESP-Launchpad web-based flashing support
 
-          ### Partition Layout
-          - **Factory App**: 1MB (GUI bootloader)
-          - **OTA_0**: 4.8MB (largest OTA slot)
-          - **OTA_1**: 4MB
-          - **OTA_2**: 4MB
-          - **Config Storage**: 2MB SPIFFS for JSON configs and icons
-          - **NVS**: 32KB
-          - **OTA Data**: 8KB
+          ## Binary Files
+          - **Merged Binary**: Complete firmware image for ESP-Launchpad
+          - **Separate Binaries**: Bootloader, partition table, and factory app for manual flashing
+
+          ### Flash Memory Layout
+          - **Bootloader**: 8KB
+          - **Partition Table**: 4KB
+          - **Factory App**: ~577KB
+          - **SPIFFS Config**: 2MB (for configuration and icons)
 
           ### Supported Hardware
           - ESP32-P4 Function EV Board
           - Touchscreen display
           - 16MB Flash (recommended)
 
+          ## Web Flashing
+          Visit https://georgik.github.io/esp32-p4-graphical-bootloader/ for browser-based flashing!
+
           For detailed documentation, visit: https://github.com/georgik/esp32-p4-graphical-bootloader
           EOF
-          )
 
           # Create release flags
           RELEASE_FLAGS=""
@@ -89,94 +90,33 @@ jobs:
             RELEASE_FLAGS="--prerelease"
           fi
 
-          # Check if release exists and create or update accordingly
-          if gh release view "${{ github.event.inputs.version }}" > /dev/null 2>&1; then
-            echo "Release exists, updating..."
-            gh release edit "${{ github.event.inputs.version }}" \
-              --title "ESP32-P4 Graphical Bootloader ${{ github.event.inputs.version }}" \
-              --notes "$RELEASE_NOTES" \
-              $RELEASE_FLAGS
-          else
-            echo "Creating new release..."
-            gh release create "${{ github.event.inputs.version }}" \
-              --title "ESP32-P4 Graphical Bootloader ${{ github.event.inputs.version }}" \
-              --notes "$RELEASE_NOTES" \
-              $RELEASE_FLAGS
-          fi
+          # Create release
+          echo "Creating release ${{ github.event.inputs.version }}..."
+          gh release create "${{ github.event.inputs.version }}" \
+            --title "ESP32-P4 Graphical Bootloader ${{ github.event.inputs.version }}" \
+            --notes-file RELEASE_NOTES.md \
+            $RELEASE_FLAGS
 
-  build-and-upload:
-    needs: create-release
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        board: [esp32_p4_function_ev_board]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build ESP-IDF project
-        uses: espressif/esp-idf-ci-action@v1.2.0
-        with:
-          target: 'esp32p4'
-          esp_idf_version: 'v5.5'
-
-      - name: Setup gh CLI for release uploads
+      - name: Upload Release Assets
         run: |
-          # Install gh CLI if not present
-          if ! command -v gh &> /dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y gh
-          fi
-
-          # Authenticate with GitHub
-          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
-
-      - name: Build Project
-        run: |
-          # Create firmware directory
-          mkdir -p firmware
-
-          # Copy individual binary files for ESP-Launchpad
-          cp build/bootloader/bootloader.bin firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-bootloader.bin
-          cp build/partition_table/partition-table.bin firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-partition-table.bin
-          cp build/esp32_p4_graphical_bootloader.bin firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-factory.bin
-
-          # Create flashing package
-          tar -czf firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}.tar.gz \
-            build/bootloader/bootloader.bin \
-            build/partition_table/partition-table.bin \
-            build/esp32_p4_graphical_bootloader.bin \
-            partitions.csv \
-            README.md
-
-      - name: Upload Release Assets using gh
-        run: |
-          # Upload all release assets using gh CLI
           echo "Uploading release assets..."
 
-          # Upload bootloader binary
+          # Upload merged binary for ESP-Launchpad
           gh release upload "${{ github.event.inputs.version }}" \
-            firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-bootloader.bin \
+            bootloader-${{ github.event.inputs.version }}-esp32_p4_function_ev_board.bin \
             --clobber
 
-          # Upload partition table
+          # Upload separate binaries for manual flashing
           gh release upload "${{ github.event.inputs.version }}" \
-            firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-partition-table.bin \
+            bootloader-${{ github.event.inputs.version }}-esp32_p4_function_ev_board-bootloader.bin \
             --clobber
 
-          # Upload factory application
           gh release upload "${{ github.event.inputs.version }}" \
-            firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-factory.bin \
+            bootloader-${{ github.event.inputs.version }}-esp32_p4_function_ev_board-partition-table.bin \
             --clobber
 
-          # Upload OTA data
           gh release upload "${{ github.event.inputs.version }}" \
-            firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}-ota-data.bin \
+            bootloader-${{ github.event.inputs.version }}-esp32_p4_function_ev_board-factory.bin \
             --clobber
 
-          # Upload package
-          gh release upload "${{ github.event.inputs.version }}" \
-            firmware/bootloader-${{ github.event.inputs.version }}-${{ matrix.board }}.tar.gz \
-            --clobber
-
-          echo "All release assets uploaded successfully!"
+          echo "✅ Release ${{ github.event.inputs.version }} created successfully!"
