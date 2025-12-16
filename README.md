@@ -146,7 +146,14 @@ REG_WRITE(BOOT_REQUEST_RTC_REG, rtc_value);
 
 ## 🚀 Quick Start: Web Flashing
 
-**ESP-Launchpad Web Flasher**: Visit https://georgik.github.io/esp32-p4-graphical-bootloader/ for one-click web-based flashing!
+For the quickest installation, use our web-based installer (Chrome/Edge browsers recommended):
+
+[![Try it with ESP Launchpad](https://espressif.github.io/esp-launchpad/assets/try_with_launchpad.png)](https://georgik.github.io/esp32-p4-graphical-bootloader/?flashConfigURL=https://georgik.github.io/esp32-p4-graphical-bootloader/config/config.toml)
+
+1. Connect your ESP32-P4 board via USB
+2. Click the button above to open the web installer
+3. Click "Connect" and select your board's serial port
+4. Click "Download & Flash" to install the bootloader
 
 ### Alternative: Manual Installation
 
@@ -281,7 +288,7 @@ idf.py monitor
 ```
 
 ### Web Flashing (ESP-Launchpad)
-Visit https://georgik.github.io/esp32-p4-graphical-bootloader/ for browser-based flashing!
+The web-based flashing interface is also available at: https://georgik.github.io/esp32-p4-graphical-bootloader/
 
 ### Downloading Releases
 Pre-built binaries are available on GitHub:
