@@ -8,10 +8,9 @@
 #include <stdio.h>
 #include "esp_lcd_touch.h"
 #include "bsp/touch.h"
-#include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
-#include "bootloader_api.h"
+#include "esp_partition.h"
 #include "soc/lp_system_reg.h"
 
 #define TAG "GraphicalBootloader"
@@ -271,10 +270,10 @@ static void show_bootloader_info(void) {
     ESP_LOGI(TAG, "===================================================");
 
     // Print partition information
-    const esp_partition_t *running_partition = esp_ota_get_running_partition();
-    ESP_LOGI(TAG, "Currently running partition: %s",
-             running_partition->label ? running_partition->label : "unknown");
-    ESP_LOGI(TAG, "Partition type: %d, subtype: %d", running_partition->type, running_partition->subtype);
+    const esp_partition_t *factory_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
+    ESP_LOGI(TAG, "Currently running from factory partition: %s",
+             factory_partition->label ? factory_partition->label : "unknown");
+    ESP_LOGI(TAG, "Factory partition offset: 0x%x, size: 0x%x", factory_partition->address, factory_partition->size);
 }
 
 // Initialize tiles with their labels and colors

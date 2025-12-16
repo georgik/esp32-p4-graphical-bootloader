@@ -42,8 +42,10 @@ The system boots into the factory application (Stage 3) by default, which presen
 ├── main/
 │   ├── graphical_bootloader.c      # Factory app with Raylib GUI
 │   ├── board_init.c                # Display and BSP initialization
+│   ├── board_init.h                # Display and BSP declarations
 │   ├── CMakeLists.txt              # Main application configuration
-│   └── idf_component.yml           # Component dependencies
+│   ├── idf_component.yml           # Component dependencies
+│   └── Kconfig.projbuild           # Configuration options
 ├── boot-knowledge.txt              # Technical documentation and storage options
 ├── partitions.csv                  # Custom partition table
 ├── sdkconfig.defaults              # Default project configuration
@@ -76,7 +78,7 @@ Defines the bootloader data structures:
 
 ### Factory Application
 
-#### `main/graphica_bootloader.c`
+#### `main/graphical_bootloader.c`
 Primary factory application with:
 - Raylib-based touch interface for framework selection
 - **Direct RTC register access** for boot requests
@@ -184,14 +186,18 @@ idf_component_register(
 ### Application Component Dependencies
 ```cmake
 idf_component_register(
-    SRCS "graphical_bootloader.c"
-    REQUIRES
-        esp_lcd_touch
+    SRCS
+        "graphical_bootloader.c"
+        "board_init.c"
+    INCLUDE_DIRS
+        "."
+    PRIV_REQUIRES
+        georgik__raylib
+        espressif__esp_lcd_touch
+        espressif__esp32_p4_function_ev_board_noglib
+        esp_partition
         esp_timer
         esp_system
-        nvs_flash
-    PRIV_REQUIRES
-        esp_raylib_port
 )
 ```
 
@@ -219,6 +225,7 @@ Applications can request specific boot partitions directly:
 
 ```c
 #include "soc/lp_system_reg.h"
+#include "soc/soc.h"  // For REG_WRITE macro
 
 // RTC register constants
 #define BOOT_REQUEST_RTC_REG     LP_SYSTEM_REG_LP_STORE0_REG

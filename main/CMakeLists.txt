@@ -1,18 +1,16 @@
-# Restore original graphical bootloader application
+# Main graphical bootloader application
 idf_component_register(
     SRCS
         "graphical_bootloader.c"
         "board_init.c"
-        "../bootloader_api.c"
     INCLUDE_DIRS
         "."
-        ".."
     PRIV_REQUIRES
         georgik__raylib
         espressif__esp_lcd_touch
         espressif__esp32_p4_function_ev_board_noglib
-        app_update
+        esp_partition
         esp_timer
-        nvs_flash
+        esp_system
         # esp_raylib_port is pulled in via georgik__raylib dependency
 )
