@@ -1,7 +1,7 @@
 # Restore original graphical bootloader application
 idf_component_register(
     SRCS
-        "hello.c"
+        "graphical_bootloader.c"
         "board_init.c"
         "../bootloader_api.c"
     INCLUDE_DIRS

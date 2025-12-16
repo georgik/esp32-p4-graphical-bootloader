@@ -14,7 +14,7 @@
 #include "bootloader_api.h"
 #include "soc/lp_system_reg.h"
 
-#define TAG "RaylibDemo"
+#define TAG "GraphicalBootloader"
 #define RAYLIB_TASK_STACK_SIZE (128 * 1024)  // 128KB stack for software renderer
 
 // RTC register constants for bootloader communication
@@ -267,7 +267,7 @@ static void show_bootloader_info(void) {
     ESP_LOGI(TAG, "=== ESP32-P4 Graphical Bootloader Information ===");
     ESP_LOGI(TAG, "Touch-enabled bootloader for ESP32-P4 Function EV Board");
     ESP_LOGI(TAG, "Built with Raylib graphics library");
-    ESP_LOGI(TAG, "Select a GUI framework tile to boot the corresponding application");
+    ESP_LOGI(TAG, "Select a button to boot the corresponding application");
     ESP_LOGI(TAG, "===================================================");
 
     // Print partition information
@@ -564,7 +564,7 @@ void raylib_task(void *pvParameter)
     }
 
     ESP_LOGI(TAG, "Initializing Raylib with display dimensions: %dx%d...", screenWidth, screenHeight);
-    InitWindow(screenWidth, screenHeight, "ESP32-P4 GUI Framework Demo");
+    InitWindow(screenWidth, screenHeight, "Select an application...");
 
     ESP_LOGI(TAG, "Raylib Initialized. Entering main loop...");
     ESP_LOGI(TAG, "Screen dimensions: %dx%d", screenWidth, screenHeight);
@@ -677,7 +677,7 @@ void raylib_task(void *pvParameter)
             DrawRectangleLinesEx((Rectangle){ballX - ballSize/2, ballY - ballSize/2, ballSize, ballSize}, 2, WHITE);
 
             // Draw title
-            const char *title = "GUI Framework Selector";
+            const char *title = "Select an application...";
             int titleFontSize = 20;
             int titleWidth = MeasureText(title, titleFontSize);
             int titleX = (screenWidth - titleWidth) / 2;

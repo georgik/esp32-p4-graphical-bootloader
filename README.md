@@ -40,14 +40,14 @@ The system boots into the factory application (Stage 3) by default, which presen
 │       ├── bootloader_custom.h     # Bootloader API and data structures
 │       └── CMakeLists.txt          # Bootloader component configuration
 ├── main/
-│   ├── hello.c                    # Factory app with Raylib GUI
-│   ├── board_init.c               # Display and BSP initialization
-│   ├── CMakeLists.txt             # Main application configuration
-│   └── idf_component.yml          # Component dependencies
+│   ├── graphical_bootloader.c      # Factory app with Raylib GUI
+│   ├── board_init.c                # Display and BSP initialization
+│   ├── CMakeLists.txt              # Main application configuration
+│   └── idf_component.yml           # Component dependencies
 ├── boot-knowledge.txt              # Technical documentation and storage options
-├── partitions.csv                 # Custom partition table
-├── sdkconfig.defaults             # Default project configuration
-└── CMakeLists.txt                 # Top-level project configuration
+├── partitions.csv                  # Custom partition table
+├── sdkconfig.defaults              # Default project configuration
+└── CMakeLists.txt                  # Top-level project configuration
 ```
 
 ## Core Files
@@ -76,7 +76,7 @@ Defines the bootloader data structures:
 
 ### Factory Application
 
-#### `main/hello.c`
+#### `main/graphica_bootloader.c`
 Primary factory application with:
 - Raylib-based touch interface for framework selection
 - **Direct RTC register access** for boot requests
@@ -187,7 +187,7 @@ idf_component_register(
 ### Application Component Dependencies
 ```cmake
 idf_component_register(
-    SRCS "hello.c"
+    SRCS "graphical_bootloader.c"
     REQUIRES
         esp_lcd_touch
         esp_timer
@@ -294,7 +294,7 @@ See `boot-knowledge.txt` for detailed technical information about:
 
 ### Adding New OTA Applications
 1. Flash application to appropriate OTA partition (`ota_0` or `ota_1`)
-2. Update GUI framework mapping in `hello.c` if needed
+2. Update GUI framework mapping in `graphical_bootloader.c` if needed
 3. Partition type mapping is handled in RTC bootloader logic
 4. No changes needed to bootloader for new OTA apps
 
