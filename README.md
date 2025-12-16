@@ -144,6 +144,10 @@ REG_WRITE(BOOT_REQUEST_RTC_REG, rtc_value);
 - Bootloader cannot depend on `app_update` component
 - Would require complex bootloader rebuild configuration
 
+## Prerequisites
+
+- ESP-IDF v5.5
+
 ## Partition Layout
 
 The custom partition table supports factory-first boot behavior:
