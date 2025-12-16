@@ -12,9 +12,14 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "bootloader_api.h"
+#include "soc/lp_system_reg.h"
 
 #define TAG "RaylibDemo"
 #define RAYLIB_TASK_STACK_SIZE (128 * 1024)  // 128KB stack for software renderer
+
+// RTC register constants for bootloader communication
+#define BOOT_REQUEST_RTC_REG     LP_SYSTEM_REG_LP_STORE0_REG
+#define BOOT_REQUEST_MAGIC_RTC   0x00544551  // 'BOOT' magic in ASCII
 
 // Tile configuration
 #define TILE_COUNT 8
@@ -60,13 +65,13 @@ static const char* get_app_label_by_index(int app_index) {
     return "Unknown";
 }
 
-// OTA switching function using custom bootloader API
+// Boot switching function using RTC register for bootloader communication
 static void ota_switch_to_app(int app_index) {
-    ESP_LOGI(TAG, "Attempting to switch to OTA partition %d", app_index);
+    ESP_LOGI(TAG, "Attempting to switch to app partition %d", app_index);
 
-    // Check if we have a valid app index (0-6 for OTA partitions, 7 is info)
-    if (app_index < 0 || app_index > 6) {
-        ESP_LOGE(TAG, "Invalid app_index %d, must be between 0-6 for OTA partitions", app_index);
+    // Check if we have a valid app index (0-1 for OTA partitions, 2 for factory, 7 is info)
+    if (app_index < 0 || app_index > 7) {
+        ESP_LOGE(TAG, "Invalid app_index %d, must be between 0-7", app_index);
         current_boot_state = BOOT_STATE_ERROR;
         return;
     }
@@ -76,40 +81,37 @@ static void ota_switch_to_app(int app_index) {
     booting_app_name = get_app_label_by_index(app_index);
     booting_animation_time = 0;
 
-    ESP_LOGI(TAG, "Booting application: %s (OTA index: %d)", booting_app_name, app_index);
+    ESP_LOGI(TAG, "Preparing to boot application: %s (index: %d)", booting_app_name, app_index);
 
-    // Map app_index to bootloader partition types
-    // app_index 0-2 map to OTA_0, OTA_1, and for simplicity we map others to OTA_0/OTA_1 alternately
-    boot_partition_type_t partition_type;
+    // Map app_index to partition type for bootloader
+    uint32_t partition_type;
     if (app_index == 0) {
-        partition_type = BOOT_PARTITION_OTA_0;
+        partition_type = 1; // OTA_0
     } else if (app_index == 1) {
-        partition_type = BOOT_PARTITION_OTA_1;
-    } else if (app_index % 2 == 0) {
-        partition_type = BOOT_PARTITION_OTA_0;
+        partition_type = 2; // OTA_1
+    } else if (app_index == 2) {
+        partition_type = 0; // Factory
     } else {
-        partition_type = BOOT_PARTITION_OTA_1;
+        ESP_LOGE(TAG, "App index %d not supported yet", app_index);
+        current_boot_state = BOOT_STATE_ERROR;
+        return;
     }
 
-    ESP_LOGI(TAG, "Requesting boot from partition type: %d", partition_type);
+    ESP_LOGI(TAG, "Writing boot request to RTC register: magic=0x%08x, partition_type=%d",
+             BOOT_REQUEST_MAGIC_RTC, partition_type);
+
+    // Write boot request to RTC register for bootloader to read
+    // Combine magic and partition type: lower 24 bits = magic, upper 8 bits = partition type
+    uint32_t rtc_value = BOOT_REQUEST_MAGIC_RTC | (partition_type << 24);
+    REG_WRITE(BOOT_REQUEST_RTC_REG, rtc_value);
+
+    ESP_LOGI(TAG, "RTC register updated successfully, value: 0x%08x", rtc_value);
 
     // Add delay to show booting animation
     vTaskDelay(pdMS_TO_TICKS(2000));
 
-    // Request next boot using custom bootloader API
-    esp_err_t err = bootloader_request_next_boot(partition_type);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Successfully requested boot to partition type %d for app %s",
-                 partition_type, booting_app_name);
-
-        // Add a small delay to allow logging to complete
-        vTaskDelay(pdMS_TO_TICKS(200));
-        ESP_LOGI(TAG, "Restarting now to boot from the custom bootloader...");
-        esp_restart();
-    } else {
-        ESP_LOGE(TAG, "Failed to request next boot: %s", esp_err_to_name(err));
-        current_boot_state = BOOT_STATE_ERROR;
-    }
+    ESP_LOGI(TAG, "Restarting now for bootloader to handle the boot request...");
+    esp_restart();
 }
 
 // Draw booting screen with animation

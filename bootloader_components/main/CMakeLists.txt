@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "bootloader_start.c"
+        "bootloader_custom.c"
     INCLUDE_DIRS
         "."
     REQUIRES
