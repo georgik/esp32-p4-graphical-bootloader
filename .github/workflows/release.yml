@@ -105,7 +105,7 @@ jobs:
         uses: espressif/esp-idf-ci-action@v1.2.0
         with:
           target: 'esp32p4'
-          esp-idf-version: v5.5
+          esp_idf_version: 'v5.5'
 
       - name: Setup gh CLI for release uploads
         run: |
