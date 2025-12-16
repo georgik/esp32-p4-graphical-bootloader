@@ -41,46 +41,46 @@ void __attribute__((noreturn)) call_start_cpu0(void)
         bootloader_reset();
     }
 
+    // Map available partitions dynamically to populate g_ota_map
+    if (bootloader_map_partitions(&bs) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to map partitions");
+        bootloader_reset();
+    }
+
     // Try to read boot request
     bool has_request = (bootloader_read_boot_request(&request) == ESP_OK);
     int boot_index;
 
     if (has_request) {
-        int partition_type = request.next_partition_type;
-        ESP_LOGI(TAG, "Boot request found: type=%d", partition_type);
+        int partition_index = request.next_partition_type;
+        ESP_LOGI(TAG, "Boot request found: partition_index=%d", partition_index);
 
-        // Handle the boot request by selecting the requested partition for this boot
-        switch (partition_type) {
-            case 0: // Factory
-                ESP_LOGI(TAG, "Request to boot factory - proceeding normally");
-                boot_index = FACTORY_INDEX;
-                break;
-            case 1: // OTA_0
-                ESP_LOGI(TAG, "Request to boot OTA_0 - will switch back to factory after this boot");
-                boot_index = 0; // OTA_0 index
-                bootloader_clear_boot_request();
-                ESP_LOGI(TAG, "Boot request cleared - will default to factory next time");
-                break;
-            case 2: // OTA_1
-                ESP_LOGI(TAG, "Request to boot OTA_1 - will switch back to factory after this boot");
-                boot_index = 1; // OTA_1 index
-                bootloader_clear_boot_request();
-                ESP_LOGI(TAG, "Boot request cleared - will default to factory next time");
-                break;
-            default:
-                ESP_LOGW(TAG, "Unknown partition type %d, defaulting to factory", partition_type);
-                boot_index = FACTORY_INDEX;
-                break;
+        // Map partition index to bootloader index
+        if (partition_index == 0) {
+            // Factory partition
+            boot_index = FACTORY_INDEX;
+            ESP_LOGI(TAG, "Booting factory partition per request");
+        } else if (partition_index > 0) {
+            // OTA partition (1-based from RTC, but bootloader expects 0-based)
+            boot_index = partition_index - 1;
+            ESP_LOGI(TAG, "Booting OTA partition %d (bootloader index %d) per request", partition_index, boot_index);
+        } else {
+            ESP_LOGW(TAG, "Invalid partition index %d, defaulting to factory", partition_index);
+            boot_index = FACTORY_INDEX;
         }
+
+        // Clear boot request after processing (one-time boot)
+        bootloader_clear_boot_request();
+        ESP_LOGI(TAG, "Boot request cleared - will default to factory next time");
     } else {
         ESP_LOGI(TAG, "No boot request found - using factory-first default behavior");
         // Factory-first: always default to factory
         boot_index = FACTORY_INDEX;
     }
 
-    ESP_LOGI(TAG, "Loading boot image from partition index: %d", boot_index);
+    ESP_LOGI(TAG, "Loading boot image from bootloader index: %d", boot_index);
 
-    // Load the selected boot image (this is the critical missing piece!)
+    // Load the selected boot image
     bootloader_utility_load_boot_image(&bs, boot_index);
 }
 

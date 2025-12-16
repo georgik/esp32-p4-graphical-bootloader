@@ -1,18 +1,17 @@
-# Name,   Type, Subtype, Offset,  Size, Flags
+# Name,             Type, SubType, Offset,   Size, Flags
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
 # Bootloader: 0x0 - 0x10000 (64KB)
 # Partition table: 0x10000 - 0x11000 (4KB)
 
 # Factory application - always boots first and default after reboot
-factory_app,  app,  factory, 0x20000,   1M,
+factory_app,        app,  factory, 0x20000,   1M,
 
-# OTA slots - applications can request to boot from these
-ota_0,        app,  ota_0,   0x120000,  1M,
-ota_1,        app,  ota_1,   0x220000,  1M,
+# Storage partitions - moved after factory app for better layout
+nvs,               data, nvs,     0x120000,  32K,
+otadata,           data, ota,     0x128000,  8K,
+bootloader_config, data, spiffs,  0x130000,  2M,
 
-# Storage partitions for bootloader boot selection
-nvs,          data, nvs,     0x320000,  32K,
-otadata,      data, ota,     0x328000,  8K,
-
-# Additional data partitions
-spiffs,       data, spiffs,  0x32a000,  1M,
+# Large OTA slots for applications (total 12.8MB)
+ota_0,             app,  ota_0,   0x330000,  0x4CC000,
+ota_1,             app,  ota_1,   0x800000,  4M,
+ota_2,             app,  ota_2,   0xC00000,  4M,

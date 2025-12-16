@@ -53,6 +53,14 @@ esp_err_t bootloader_read_boot_request(boot_request_t *request);
 esp_err_t bootloader_clear_boot_request(void);
 
 /**
+ * @brief Map available partitions dynamically from partition table
+ *
+ * @param state Bootloader state information (ESP-IDF's bootloader_state_t)
+ * @return ESP_OK on success
+ */
+esp_err_t bootloader_map_partitions(const bootloader_state_t *state);
+
+/**
  * @brief Get the partition to boot based on request and default behavior
  *
  * @param request Pointer to boot request (can be NULL for no request)

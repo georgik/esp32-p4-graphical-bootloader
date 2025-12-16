@@ -16,6 +16,58 @@ typedef struct {
     uint32_t partition_type;  // 0=Factory, 1=OTA_0, 2=OTA_1
 } rtc_boot_request_t;
 
+// Dynamic OTA partition mapping structure
+typedef struct {
+    const esp_partition_t* factory;
+    const esp_partition_t* ota_partitions[16];  // Support up to 16 OTA partitions
+    int ota_count;
+} ota_partition_map_t;
+
+static ota_partition_map_t g_ota_map = {0};
+
+// Function to dynamically map available partitions
+esp_err_t bootloader_map_partitions(const bootloader_state_t* state)
+{
+    ESP_LOGI(TAG, "=== Mapping Available Partitions ===");
+
+    // Initialize the mapping structure
+    memset(&g_ota_map, 0, sizeof(g_ota_map));
+
+    // Find factory partition
+    g_ota_map.factory = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
+                                                   ESP_PARTITION_SUBTYPE_APP_FACTORY,
+                                                   NULL);
+    if (g_ota_map.factory) {
+        ESP_LOGI(TAG, "Found factory partition: %s at 0x%x (size: 0x%x)",
+                 g_ota_map.factory->label ? g_ota_map.factory->label : "unknown",
+                 g_ota_map.factory->address,
+                 g_ota_map.factory->size);
+    }
+
+    // Find all OTA partitions dynamically
+    for (int i = 0; i < 16; i++) {
+        esp_partition_subtype_t subtype = ESP_PARTITION_SUBTYPE_APP_OTA_MIN + i;
+        const esp_partition_t* partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, subtype, NULL);
+
+        if (partition) {
+            if (g_ota_map.ota_count < 16) {
+                g_ota_map.ota_partitions[g_ota_map.ota_count] = partition;
+                ESP_LOGI(TAG, "Found OTA partition %d: %s at 0x%x (size: 0x%x)",
+                         g_ota_map.ota_count,
+                         partition->label ? partition->label : "unknown",
+                         partition->address,
+                         partition->size);
+                g_ota_map.ota_count++;
+            }
+        } else {
+            break;  // No more OTA partitions found
+        }
+    }
+
+    ESP_LOGI(TAG, "Partition mapping complete: %d OTA partitions available", g_ota_map.ota_count);
+    return ESP_OK;
+}
+
 esp_err_t bootloader_read_boot_request(boot_request_t *request)
 {
     ESP_LOGI(TAG, "=== Custom Bootloader Active (RTC-based) ===");
@@ -38,11 +90,11 @@ esp_err_t bootloader_read_boot_request(boot_request_t *request)
         return ESP_ERR_NOT_FOUND;
     }
 
-    ESP_LOGI(TAG, "RTC boot request found: magic=0x%06x, partition_type=%d", magic, partition_type);
+    ESP_LOGI(TAG, "RTC boot request found: magic=0x%06x, partition_index=%d", magic, partition_type);
 
-    // Validate partition type
-    if (partition_type > 2) {
-        ESP_LOGW(TAG, "Invalid partition type %d in RTC request, defaulting to factory", partition_type);
+    // Validate partition index (0=Factory, 1-N=OTA)
+    if (partition_type > g_ota_map.ota_count) {
+        ESP_LOGW(TAG, "Invalid partition index %d (max: %d), defaulting to factory", partition_type, g_ota_map.ota_count);
         partition_type = 0;
     }
 
@@ -54,7 +106,7 @@ esp_err_t bootloader_read_boot_request(boot_request_t *request)
     request->timestamp = 0;
     request->next_partition_type = partition_type;
 
-    ESP_LOGI(TAG, "Boot request loaded from RTC: type=%d, will reset to factory after this boot", request->next_partition_type);
+    ESP_LOGI(TAG, "Boot request loaded from RTC: index=%d, will reset to factory after this boot", request->next_partition_type);
     return ESP_OK;
 }
 
@@ -72,64 +124,50 @@ esp_err_t bootloader_clear_boot_request(void)
 const esp_partition_t* bootloader_get_boot_partition(const boot_request_t *request,
                                                       const bootloader_state_t *state)
 {
-    ESP_LOGI(TAG, "=== Custom Bootloader Partition Selection ===");
+    ESP_LOGI(TAG, "=== Custom Bootloader Partition Selection (Dynamic) ===");
 
     // Default to factory partition if no request
     if (!request) {
         ESP_LOGI(TAG, "No boot request, defaulting to factory application");
-        return esp_partition_find_first(ESP_PARTITION_TYPE_APP,
-                                        ESP_PARTITION_SUBTYPE_APP_FACTORY,
-                                        NULL);
+        return g_ota_map.factory;
     }
 
-    ESP_LOGI(TAG, "Processing boot request: type=%d, boot_count=%d",
+    ESP_LOGI(TAG, "Processing boot request: index=%d, boot_count=%d",
              request->next_partition_type, request->boot_count);
 
     const esp_partition_t *selected_partition = NULL;
+    int partition_index = request->next_partition_type;
 
-    switch (request->next_partition_type) {
-        case 0: // Factory
-            ESP_LOGI(TAG, "Selected factory partition");
-            selected_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
-                                                        ESP_PARTITION_SUBTYPE_APP_FACTORY,
-                                                        NULL);
-            break;
-
-        case 1: // OTA_0
-            ESP_LOGI(TAG, "Selected OTA_0 partition (one-time boot - will revert to factory next time)");
-            selected_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
-                                                        ESP_PARTITION_SUBTYPE_APP_OTA_0,
-                                                        NULL);
-            break;
-
-        case 2: // OTA_1
-            ESP_LOGI(TAG, "Selected OTA_1 partition (one-time boot - will revert to factory next time)");
-            selected_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
-                                                        ESP_PARTITION_SUBTYPE_APP_OTA_1,
-                                                        NULL);
-            break;
-
-        default:
-            ESP_LOGW(TAG, "Unknown partition type %d, defaulting to factory",
-                     request->next_partition_type);
-            selected_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
-                                                        ESP_PARTITION_SUBTYPE_APP_FACTORY,
-                                                        NULL);
-            break;
+    // Dynamic partition mapping based on request index
+    if (partition_index == 0) {
+        // Factory partition
+        ESP_LOGI(TAG, "Selected factory partition");
+        selected_partition = g_ota_map.factory;
+    } else if (partition_index > 0 && partition_index <= g_ota_map.ota_count) {
+        // OTA partition (1-based indexing from RTC)
+        selected_partition = g_ota_map.ota_partitions[partition_index - 1];
+        ESP_LOGI(TAG, "Selected OTA partition %d: %s at 0x%x (size: 0x%x) - one-time boot",
+                 partition_index,
+                 selected_partition->label ? selected_partition->label : "unknown",
+                 selected_partition->address,
+                 selected_partition->size);
+    } else {
+        // Invalid index, fallback to factory
+        ESP_LOGW(TAG, "Invalid partition index %d, defaulting to factory", partition_index);
+        selected_partition = g_ota_map.factory;
     }
 
     // Fallback to factory if requested partition is not available
     if (!selected_partition) {
         ESP_LOGW(TAG, "Requested partition not available, falling back to factory");
-        selected_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
-                                                    ESP_PARTITION_SUBTYPE_APP_FACTORY,
-                                                    NULL);
+        selected_partition = g_ota_map.factory;
     }
 
     if (selected_partition) {
-        ESP_LOGI(TAG, "Selected partition: %s at offset 0x%x",
+        ESP_LOGI(TAG, "Selected partition: %s at offset 0x%x (size: 0x%x)",
                  selected_partition->label ? selected_partition->label : "unknown",
-                 selected_partition->address);
+                 selected_partition->address,
+                 selected_partition->size);
     }
 
     return selected_partition;

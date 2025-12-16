@@ -6,3 +6,4 @@ dependencies:
   idf:
     version: '>=5.1.0'
   espressif/esp32_p4_function_ev_board_noglib: '*'
+  espressif/cjson: ^1.7.19

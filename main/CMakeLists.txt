@@ -12,5 +12,6 @@ idf_component_register(
         esp_partition
         esp_timer
         esp_system
+        spiffs                 # For configuration storage
         # esp_raylib_port is pulled in via georgik__raylib dependency
 )

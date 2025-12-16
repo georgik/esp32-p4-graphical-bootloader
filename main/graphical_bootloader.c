@@ -6,12 +6,20 @@
 #include "freertos/task.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "esp_lcd_touch.h"
 #include "bsp/touch.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_partition.h"
 #include "soc/lp_system_reg.h"
+#include "cJSON.h"  // For JSON configuration parsing
+#include "esp_spiffs.h"
+#include "esp_vfs.h"
+#include "esp_vfs_fat.h"
 
 #define TAG "GraphicalBootloader"
 #define RAYLIB_TASK_STACK_SIZE (128 * 1024)  // 128KB stack for software renderer
@@ -19,6 +27,14 @@
 // RTC register constants for bootloader communication
 #define BOOT_REQUEST_RTC_REG     LP_SYSTEM_REG_LP_STORE0_REG
 #define BOOT_REQUEST_MAGIC_RTC   0x00544551  // 'BOOT' magic in ASCII
+
+// Configuration constants
+#define CONFIG_BASE_PATH "/spiflash"
+#define CONFIG_FILE_PATH "/spiflash/config/apps.json"
+#define CONFIG_BACKUP_PATH "/spiflash/config/apps.backup.json"
+#define CONFIG_DEFAULT_PATH "/spiflash/config/apps.default.json"
+#define ICONS_DIR_PATH "/spiflash/icons/"
+#define MAX_APPS 16
 
 // Tile configuration
 #define TILE_COUNT 8
@@ -40,6 +56,46 @@ typedef struct {
     int otaIndex;  // Which OTA partition this tile represents (-1 for info)
 } Tile;
 
+// Icon structure for button graphics
+typedef struct {
+    char file_path[256];    // Path to icon file
+    Rectangle position;     // Position relative to button top-left
+    Rectangle size;         // Icon size
+    Color fallback_color;   // Color to use if icon fails to load
+    Texture2D texture;      // Loaded texture
+    bool loaded;            // Whether icon was successfully loaded
+} app_icon_t;
+
+// Enhanced app configuration structure
+typedef struct {
+    char name[64];
+    int partition_index;
+    struct {
+        Color text_color;
+        Color bg_color;
+        Color hover_color;
+        Rectangle position;  // Custom position (optional)
+        Rectangle size;      // Custom size (optional)
+    } button;
+    app_icon_t icon;
+    bool enabled;
+    bool auto_update;
+    char description[256];
+} app_config_t;
+
+// Global configuration structure
+typedef struct {
+    char version[16];
+    int tile_cols;
+    int tile_rows;
+    int tile_margin;
+    int tile_width;
+    int tile_height;
+    int font_size;
+    app_config_t apps[MAX_APPS];
+    int num_apps;
+} bootloader_config_t;
+
 // Boot state for visual feedback
 typedef enum {
     BOOT_STATE_SELECTING,
@@ -51,6 +107,22 @@ static boot_state_t current_boot_state = BOOT_STATE_SELECTING;
 static const char* booting_app_name = NULL;
 static int booting_animation_time = 0;
 static int selected_tile_index = -1;
+
+// Configuration management globals
+static bootloader_config_t g_config;
+static bool g_config_loaded = false;
+static bool g_spiffs_mounted = false;
+
+// Configuration function prototypes
+static esp_err_t init_spiffsfs(void);
+static esp_err_t create_directory_structure(void);
+static esp_err_t load_configuration(void);
+static esp_err_t save_configuration(void) __attribute__((unused));  // Will be used in Phase 4
+static esp_err_t create_default_configuration(void);
+static esp_err_t parse_color_from_json(cJSON* json, Color* color);
+static esp_err_t parse_rectangle_from_json(cJSON* json, Rectangle* rect);
+static esp_err_t load_app_icon(app_icon_t* icon);
+static void cleanup_configuration(void) __attribute__((unused));  // Will be used in cleanup
 
 // Get app label by OTA index
 static const char* get_app_label_by_index(int app_index) {
@@ -68,10 +140,17 @@ static const char* get_app_label_by_index(int app_index) {
 static void ota_switch_to_app(int app_index) {
     ESP_LOGI(TAG, "Attempting to switch to app partition %d", app_index);
 
-    // Check if we have a valid app index (0-1 for OTA partitions, 2 for factory, 7 is info)
-    if (app_index < 0 || app_index > 7) {
-        ESP_LOGE(TAG, "Invalid app_index %d, must be between 0-7", app_index);
+    // Check if we have a valid app index (0-9 for app list, info handled separately)
+    if (app_index < 0 || app_index > 9) {
+        ESP_LOGE(TAG, "Invalid app_index %d, must be between 0-9", app_index);
         current_boot_state = BOOT_STATE_ERROR;
+        return;
+    }
+
+    // Check if this is the Info button (index 9)
+    if (app_index == 9) {
+        ESP_LOGI(TAG, "Info button pressed - showing system information");
+        current_boot_state = BOOT_STATE_ERROR;  // Use error screen to show info
         return;
     }
 
@@ -85,13 +164,17 @@ static void ota_switch_to_app(int app_index) {
     // Map app_index to partition type for bootloader
     uint32_t partition_type;
     if (app_index == 0) {
-        partition_type = 1; // OTA_0
+        partition_type = 1; // OTA_0 (4.8MB)
     } else if (app_index == 1) {
-        partition_type = 2; // OTA_1
+        partition_type = 2; // OTA_1 (4MB)
     } else if (app_index == 2) {
-        partition_type = 0; // Factory
+        partition_type = 3; // OTA_2 (4MB)
+    } else if (app_index >= 3 && app_index <= 8) {
+        // Demo apps map to available OTA partitions (wrap around)
+        partition_type = ((app_index - 3) % 3) + 1;
+        ESP_LOGI(TAG, "Demo app %d mapping to OTA partition type %d", app_index - 2, partition_type);
     } else {
-        ESP_LOGE(TAG, "App index %d not supported yet", app_index);
+        ESP_LOGE(TAG, "App index %d not supported", app_index);
         current_boot_state = BOOT_STATE_ERROR;
         return;
     }
@@ -320,7 +403,7 @@ void initialize_tiles(Tile* tiles, int screenWidth, int screenHeight) {
 void update_tiles(Tile* tiles, int count, esp_lcd_touch_handle_t touch_handle) {
     static int64_t last_selection_time = 0;
     static bool was_touching = false;
-    static Vector2 last_touch_pos = {-1, -1};  // Store last touch position for release detection
+    static Vector2 last_touch_pos __attribute__((unused)) = {-1, -1};  // Store last touch position for release detection
     Vector2 mousePos = GetMousePosition();
     uint16_t touch_x[1] = {0};
     uint16_t touch_y[1] = {0};
@@ -724,14 +807,37 @@ void app_main(void)
     ESP_LOGI(TAG, "Initializing board display...");
     
     // Initialize display hardware and port layer
+    // Initialize configuration system
+    ESP_LOGI(TAG, "Initializing configuration system...");
+    esp_err_t config_ret = init_spiffsfs();
+    if (config_ret == ESP_OK) {
+        config_ret = create_directory_structure();
+        if (config_ret == ESP_OK) {
+            config_ret = load_configuration();
+            if (config_ret == ESP_OK) {
+                ESP_LOGI(TAG, "Configuration loaded successfully (%d apps)", g_config.num_apps);
+            } else {
+                ESP_LOGW(TAG, "Failed to load configuration: %d", config_ret);
+                ESP_LOGI(TAG, "Using default configuration");
+                create_default_configuration();
+            }
+        } else {
+            ESP_LOGE(TAG, "Failed to create directory structure: %d", config_ret);
+        }
+    } else {
+        ESP_LOGE(TAG, "Failed to initialize SPIFFS: %d", config_ret);
+        ESP_LOGI(TAG, "Using embedded default configuration");
+        create_default_configuration();
+    }
+
     esp_err_t ret = board_init_display();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize display: %d", ret);
         return;
     }
-    
+
     ESP_LOGI(TAG, "Creating raylib task with %dKB stack...", RAYLIB_TASK_STACK_SIZE / 1024);
-    
+
     // Create dedicated task for raylib with large stack
     xTaskCreatePinnedToCore(
         raylib_task,              // Task function
@@ -742,5 +848,488 @@ void app_main(void)
         NULL,                     // Task handle
         1                         // Core ID (run on core 1)
     );
+}
+
+// Configuration management functions implementation
+static esp_err_t init_spiffsfs(void) {
+    ESP_LOGI(TAG, "Initializing SPIFFS");
+
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = CONFIG_BASE_PATH,
+        .partition_label = "bootloader_config",
+        .max_files = 5,
+        .format_if_mount_failed = true
+    };
+
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+    if (ret != ESP_OK) {
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(TAG, "Failed to mount or format filesystem");
+        } else if (ret == ESP_ERR_NOT_FOUND) {
+            ESP_LOGE(TAG, "Failed to find SPIFFS partition");
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize SPIFFS (%d)", ret);
+        }
+        return ret;
+    }
+
+    size_t total = 0, used = 0;
+    ret = esp_spiffs_info("bootloader_config", &total, &used);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get SPIFFS partition information (%d)", ret);
+    } else {
+        ESP_LOGI(TAG, "SPIFFS partition size: total: %d, used: %d", total, used);
+    }
+
+    g_spiffs_mounted = true;
+    return ESP_OK;
+}
+
+static esp_err_t create_directory_structure(void) {
+    struct stat st;
+
+    // Create config directory
+    if (stat("/spiflash/config", &st) != 0) {
+        if (mkdir("/spiflash/config", 0755) != 0) {
+            ESP_LOGE(TAG, "Failed to create config directory");
+            return ESP_FAIL;
+        }
+    }
+
+    // Create icons directory
+    if (stat(ICONS_DIR_PATH, &st) != 0) {
+        if (mkdir(ICONS_DIR_PATH, 0755) != 0) {
+            ESP_LOGE(TAG, "Failed to create icons directory");
+            return ESP_FAIL;
+        }
+    }
+
+    ESP_LOGI(TAG, "Directory structure created");
+    return ESP_OK;
+}
+
+static esp_err_t parse_color_from_json(cJSON* json, Color* color) {
+    if (!json || !color) return ESP_ERR_INVALID_ARG;
+
+    cJSON* r_item = cJSON_GetObjectItem(json, "r");
+    cJSON* g_item = cJSON_GetObjectItem(json, "g");
+    cJSON* b_item = cJSON_GetObjectItem(json, "b");
+    cJSON* a_item = cJSON_GetObjectItem(json, "a");
+
+    if (!cJSON_IsNumber(r_item) || !cJSON_IsNumber(g_item) || !cJSON_IsNumber(b_item)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    color->r = (uint8_t)cJSON_GetNumberValue(r_item);
+    color->g = (uint8_t)cJSON_GetNumberValue(g_item);
+    color->b = (uint8_t)cJSON_GetNumberValue(b_item);
+    color->a = a_item ? (uint8_t)cJSON_GetNumberValue(a_item) : 255;
+
+    return ESP_OK;
+}
+
+static esp_err_t parse_rectangle_from_json(cJSON* json, Rectangle* rect) {
+    if (!json || !rect) return ESP_ERR_INVALID_ARG;
+
+    cJSON* x_item = cJSON_GetObjectItem(json, "x");
+    cJSON* y_item = cJSON_GetObjectItem(json, "y");
+    cJSON* width_item = cJSON_GetObjectItem(json, "width");
+    cJSON* height_item = cJSON_GetObjectItem(json, "height");
+
+    if (!cJSON_IsNumber(x_item) || !cJSON_IsNumber(y_item) ||
+        !cJSON_IsNumber(width_item) || !cJSON_IsNumber(height_item)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    rect->x = (float)cJSON_GetNumberValue(x_item);
+    rect->y = (float)cJSON_GetNumberValue(y_item);
+    rect->width = (float)cJSON_GetNumberValue(width_item);
+    rect->height = (float)cJSON_GetNumberValue(height_item);
+
+    return ESP_OK;
+}
+
+static esp_err_t load_app_icon(app_icon_t* icon) {
+    if (!icon || strlen(icon->file_path) == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Check if file exists
+    struct stat st;
+    if (stat(icon->file_path, &st) != 0) {
+        ESP_LOGW(TAG, "Icon file not found: %s", icon->file_path);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    // Load image
+    Image img = LoadImage(icon->file_path);
+    if (!img.data) {
+        ESP_LOGW(TAG, "Failed to load icon: %s", icon->file_path);
+        return ESP_FAIL;
+    }
+
+    // Convert to texture
+    icon->texture = LoadTextureFromImage(img);
+    UnloadImage(img);
+
+    if (!icon->texture.id) {
+        ESP_LOGW(TAG, "Failed to create texture for icon: %s", icon->file_path);
+        return ESP_FAIL;
+    }
+
+    icon->loaded = true;
+    ESP_LOGI(TAG, "Successfully loaded icon: %s", icon->file_path);
+    return ESP_OK;
+}
+
+static esp_err_t create_default_configuration(void) {
+    ESP_LOGI(TAG, "Creating default configuration");
+
+    // Initialize with default values
+    strcpy(g_config.version, "1.0");
+    g_config.tile_cols = TILE_COLS;
+    g_config.tile_rows = TILE_ROWS;
+    g_config.tile_margin = TILE_MARGIN;
+    g_config.tile_width = TILE_WIDTH;
+    g_config.tile_height = TILE_HEIGHT;
+    g_config.font_size = 16;
+    g_config.num_apps = 10;  // 3 OTA + 6 demo + 1 info
+
+    // Create default app configurations
+    const char* default_names[] = {
+        "OTA App 1", "OTA App 2", "OTA App 3",
+        "Demo 1", "Demo 2", "Demo 3", "Demo 4", "Demo 5", "Demo 6", "Info"
+    };
+    Color default_colors[] = {
+        SKYBLUE, LIME, VIOLET,
+        BLUE, GREEN, PURPLE, RED, ORANGE, YELLOW, GRAY
+    };
+
+    for (int i = 0; i < 10; i++) {
+        app_config_t* app = &g_config.apps[i];
+        strcpy(app->name, default_names[i]);
+
+        // Map partition indices
+        if (i < 3) {
+            app->partition_index = i;  // OTA_0, OTA_1, OTA_2
+        } else {
+            app->partition_index = i - 3;  // Demo apps map to OTA partitions when available
+        }
+
+        app->enabled = true;
+        app->auto_update = false;
+
+        if (i < 3) {
+            snprintf(app->description, sizeof(app->description), "OTA application %d - 4.8MB/4MB partition", i + 1);
+        } else if (i < 9) {
+            snprintf(app->description, sizeof(app->description), "Demo application %d", i - 2);
+        } else {
+            strcpy(app->description, "System information and partition details");
+        }
+
+        // Default button styling
+        app->button.text_color = WHITE;
+        app->button.bg_color = default_colors[i];
+        app->button.hover_color = ColorBrightness(default_colors[i], 0.2f);
+
+        // Default icon configuration
+        strcpy(app->icon.file_path, "");
+        app->icon.position = (Rectangle){10, 5, 32, 32};
+        app->icon.size = (Rectangle){32, 32, 0, 0};
+        app->icon.fallback_color = default_colors[i];
+        app->icon.loaded = false;
+    }
+
+    // Handle Info button specifically
+    app_config_t* info_app = &g_config.apps[9];
+    strcpy(info_app->name, "System Info");
+    info_app->partition_index = -1;
+    strcpy(info_app->description, "Partition information and system details");
+    info_app->icon.fallback_color = GRAY;
+
+    g_config_loaded = true;
+    return ESP_OK;
+}
+
+static void cleanup_configuration(void) {
+    // Unload all loaded textures
+    for (int i = 0; i < g_config.num_apps; i++) {
+        if (g_config.apps[i].icon.loaded) {
+            UnloadTexture(g_config.apps[i].icon.texture);
+            g_config.apps[i].icon.loaded = false;
+        }
+    }
+}
+
+static esp_err_t load_configuration(void) {
+    FILE* file = fopen(CONFIG_FILE_PATH, "r");
+    if (!file) {
+        ESP_LOGW(TAG, "Configuration file not found: %s", CONFIG_FILE_PATH);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    // Read file content
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    if (file_size <= 0 || file_size > 65536) {  // Max 64KB
+        fclose(file);
+        ESP_LOGE(TAG, "Invalid configuration file size: %ld", file_size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    char* buffer = malloc(file_size + 1);
+    if (!buffer) {
+        fclose(file);
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t read_size = fread(buffer, 1, file_size, file);
+    fclose(file);
+
+    if (read_size != (size_t)file_size) {
+        free(buffer);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    buffer[file_size] = '\0';
+
+    // Parse JSON
+    cJSON* root = cJSON_Parse(buffer);
+    free(buffer);
+
+    if (!root) {
+        ESP_LOGE(TAG, "Failed to parse JSON configuration");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    esp_err_t ret = ESP_OK;
+
+    // Parse version
+    cJSON* version = cJSON_GetObjectItem(root, "version");
+    if (cJSON_IsString(version)) {
+        strncpy(g_config.version, cJSON_GetStringValue(version), sizeof(g_config.version) - 1);
+    } else {
+        strcpy(g_config.version, "1.0");
+    }
+
+    // Parse layout
+    cJSON* layout = cJSON_GetObjectItem(root, "layout");
+    if (layout) {
+        cJSON* item = cJSON_GetObjectItem(layout, "tile_cols");
+        if (cJSON_IsNumber(item)) g_config.tile_cols = cJSON_GetNumberValue(item);
+
+        item = cJSON_GetObjectItem(layout, "tile_rows");
+        if (cJSON_IsNumber(item)) g_config.tile_rows = cJSON_GetNumberValue(item);
+
+        item = cJSON_GetObjectItem(layout, "tile_margin");
+        if (cJSON_IsNumber(item)) g_config.tile_margin = cJSON_GetNumberValue(item);
+
+        item = cJSON_GetObjectItem(layout, "tile_width");
+        if (cJSON_IsNumber(item)) g_config.tile_width = cJSON_GetNumberValue(item);
+
+        item = cJSON_GetObjectItem(layout, "tile_height");
+        if (cJSON_IsNumber(item)) g_config.tile_height = cJSON_GetNumberValue(item);
+    }
+
+    // Parse apps
+    cJSON* apps = cJSON_GetObjectItem(root, "apps");
+    if (cJSON_IsArray(apps)) {
+        int app_count = cJSON_GetArraySize(apps);
+        g_config.num_apps = (app_count > MAX_APPS) ? MAX_APPS : app_count;
+
+        for (int i = 0; i < g_config.num_apps; i++) {
+            cJSON* app_obj = cJSON_GetArrayItem(apps, i);
+            if (!app_obj) continue;
+
+            app_config_t* app = &g_config.apps[i];
+
+            // Parse name
+            cJSON* item = cJSON_GetObjectItem(app_obj, "name");
+            if (cJSON_IsString(item)) {
+                strncpy(app->name, cJSON_GetStringValue(item), sizeof(app->name) - 1);
+            }
+
+            // Parse partition index
+            item = cJSON_GetObjectItem(app_obj, "partition_index");
+            if (cJSON_IsNumber(item)) {
+                app->partition_index = cJSON_GetNumberValue(item);
+            }
+
+            // Parse button properties
+            cJSON* button = cJSON_GetObjectItem(app_obj, "button");
+            if (button) {
+                item = cJSON_GetObjectItem(button, "text_color");
+                if (cJSON_IsObject(item)) {
+                    parse_color_from_json(item, &app->button.text_color);
+                } else if (cJSON_IsString(item)) {
+                    // Parse hex color string like "#RRGGBB" or "#RRGGBBAA"
+                    const char* hex_str = cJSON_GetStringValue(item);
+                    if (hex_str && strlen(hex_str) >= 7 && hex_str[0] == '#') {
+                        unsigned int color;
+                        sscanf(hex_str, "#%x", &color);
+                        app->button.text_color = (Color){(color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF, 255};
+                    }
+                }
+
+                item = cJSON_GetObjectItem(button, "bg_color");
+                if (cJSON_IsObject(item)) {
+                    parse_color_from_json(item, &app->button.bg_color);
+                } else if (cJSON_IsString(item)) {
+                    const char* hex_str = cJSON_GetStringValue(item);
+                    if (hex_str && strlen(hex_str) >= 7 && hex_str[0] == '#') {
+                        unsigned int color;
+                        sscanf(hex_str, "#%x", &color);
+                        app->button.bg_color = (Color){(color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF, 255};
+                    }
+                }
+
+                item = cJSON_GetObjectItem(button, "hover_color");
+                if (cJSON_IsObject(item)) {
+                    parse_color_from_json(item, &app->button.hover_color);
+                }
+
+                cJSON* pos = cJSON_GetObjectItem(button, "position");
+                if (pos) {
+                    parse_rectangle_from_json(pos, &app->button.position);
+                }
+
+                cJSON* size = cJSON_GetObjectItem(button, "size");
+                if (size) {
+                    parse_rectangle_from_json(size, &app->button.size);
+                }
+            }
+
+            // Parse icon properties
+            cJSON* icon = cJSON_GetObjectItem(app_obj, "icon");
+            if (icon) {
+                item = cJSON_GetObjectItem(icon, "file");
+                if (cJSON_IsString(item)) {
+                    strncpy(app->icon.file_path, cJSON_GetStringValue(item), sizeof(app->icon.file_path) - 1);
+                }
+
+                cJSON* pos = cJSON_GetObjectItem(icon, "position");
+                if (pos) {
+                    parse_rectangle_from_json(pos, &app->icon.position);
+                }
+
+                cJSON* size = cJSON_GetObjectItem(icon, "size");
+                if (size) {
+                    parse_rectangle_from_json(size, &app->icon.size);
+                }
+
+                item = cJSON_GetObjectItem(icon, "fallback_color");
+                if (cJSON_IsObject(item)) {
+                    parse_color_from_json(item, &app->icon.fallback_color);
+                }
+
+                // Try to load the icon
+                load_app_icon(&app->icon);
+            }
+
+            // Parse other properties
+            item = cJSON_GetObjectItem(app_obj, "enabled");
+            if (cJSON_IsBool(item)) {
+                app->enabled = cJSON_IsTrue(item);
+            }
+
+            item = cJSON_GetObjectItem(app_obj, "auto_update");
+            if (cJSON_IsBool(item)) {
+                app->auto_update = cJSON_IsTrue(item);
+            }
+
+            item = cJSON_GetObjectItem(app_obj, "description");
+            if (cJSON_IsString(item)) {
+                strncpy(app->description, cJSON_GetStringValue(item), sizeof(app->description) - 1);
+            }
+        }
+    } else {
+        ret = ESP_ERR_INVALID_RESPONSE;
+    }
+
+    cJSON_Delete(root);
+    if (ret == ESP_OK) {
+        g_config_loaded = true;
+        ESP_LOGI(TAG, "Configuration loaded successfully");
+    }
+
+    return ret;
+}
+
+static esp_err_t save_configuration(void) {
+    cJSON* root = cJSON_CreateObject();
+    if (!root) return ESP_ERR_NO_MEM;
+
+    // Add version
+    cJSON_AddStringToObject(root, "version", g_config.version);
+
+    // Add layout
+    cJSON* layout = cJSON_CreateObject();
+    cJSON_AddNumberToObject(layout, "tile_cols", g_config.tile_cols);
+    cJSON_AddNumberToObject(layout, "tile_rows", g_config.tile_rows);
+    cJSON_AddNumberToObject(layout, "tile_margin", g_config.tile_margin);
+    cJSON_AddNumberToObject(layout, "tile_width", g_config.tile_width);
+    cJSON_AddNumberToObject(layout, "tile_height", g_config.tile_height);
+    cJSON_AddNumberToObject(layout, "font_size", g_config.font_size);
+    cJSON_AddItemToObject(root, "layout", layout);
+
+    // Add apps
+    cJSON* apps = cJSON_CreateArray();
+    for (int i = 0; i < g_config.num_apps; i++) {
+        app_config_t* app = &g_config.apps[i];
+        cJSON* app_obj = cJSON_CreateObject();
+
+        cJSON_AddStringToObject(app_obj, "name", app->name);
+        cJSON_AddNumberToObject(app_obj, "partition_index", app->partition_index);
+        cJSON_AddBoolToObject(app_obj, "enabled", app->enabled);
+        cJSON_AddBoolToObject(app_obj, "auto_update", app->auto_update);
+        cJSON_AddStringToObject(app_obj, "description", app->description);
+
+        // Add button configuration
+        cJSON* button = cJSON_CreateObject();
+        cJSON_AddItemToObject(app_obj, "button", button);
+
+        // Add icon configuration
+        cJSON* icon = cJSON_CreateObject();
+        cJSON_AddStringToObject(icon, "file", app->icon.file_path);
+        cJSON_AddNumberToObject(icon, "fallback_color", app->icon.fallback_color.r << 16 | app->icon.fallback_color.g << 8 | app->icon.fallback_color.b);
+        cJSON_AddItemToObject(app_obj, "icon", icon);
+
+        cJSON_AddItemToArray(apps, app_obj);
+    }
+    cJSON_AddItemToObject(root, "apps", apps);
+
+    // Convert to string
+    char* json_string = cJSON_Print(root);
+    cJSON_Delete(root);
+
+    if (!json_string) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Create backup first
+    FILE* backup_file = fopen(CONFIG_BACKUP_PATH, "w");
+    if (backup_file) {
+        fputs(json_string, backup_file);
+        fclose(backup_file);
+    }
+
+    // Write to main config file
+    FILE* file = fopen(CONFIG_FILE_PATH, "w");
+    if (!file) {
+        free(json_string);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    size_t written = fwrite(json_string, 1, strlen(json_string), file);
+    fclose(file);
+    free(json_string);
+
+    if (written != strlen(json_string)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    ESP_LOGI(TAG, "Configuration saved successfully");
+    return ESP_OK;
 }
 
