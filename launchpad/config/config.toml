@@ -17,8 +17,8 @@ chipsets = ["ESP32-P4"]
 developKits.esp32-p4 = ["esp32-p4-function-ev-board"]
 
 # Firmware images for each board - use multipart format for separate ESP-IDF binaries
-# The chip key must match the chipset in lowercase
-[image.esp32-p4]
+# The image key must match the development kit name
+[image.esp32-p4-function-ev-board]
 parts = [
     "bootloader-latest-esp32_p4_function_ev_board-bootloader.bin",
     "bootloader-latest-esp32_p4_function_ev_board-partition-table.bin",
