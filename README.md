@@ -1,6 +1,15 @@
-# ESP32-P4 Graphical Bootloader with Factory-First Boot
+# ESP32-P4 Graphical Bootloader with RTC Boot
 
-A 2nd + 3rd stage bootloader with touch-enabled GUI framework selection for ESP32-P4 Function EV Board, featuring **factory-first boot behavior** where the system always defaults to the factory application unless a specific OTA boot request is made.
+A 2nd + 3rd stage bootloader with touch-enabled GUI framework selection for ESP32-P4 Function EV Board.
+The bootloader allows graphical selection of partition to boot using RTC mechanism.
+After the next HW reboot it returns to orifinal state.
+This approach does not require modification of flashed applications.
+
+If you're lookign for simpler bootloader which utilizes OTA partition switching, check out article:
+[How to switch between multiple ESP32 firmware binaries stored in the flash memory
+](https://developer.espressif.com/blog/switch-between-firmware-binaries/), that approach requires modification
+of each of flashed applications.
+
 
 ## Architecture Overview
 
@@ -113,40 +122,28 @@ REG_WRITE(BOOT_REQUEST_RTC_REG, rtc_value);
 ```
 
 ### RTC Register Advantages
-✅ **Available in bootloader context** (no component dependencies)
-✅ **Survives across reboots** (RTC memory)
-✅ **No flash wear** (register access)
-✅ **Simple 32-bit interface** (easy to encode/decode)
-✅ **Factory-first by default** (cleared after use)
+- **Available in bootloader context** (no component dependencies)
+- **Survives across reboots** (RTC memory)
+- **No flash wear** (register access)
+- **Simple 32-bit interface** (easy to encode/decode)
+- **Factory-first by default** (cleared after use)
 
 ## Failed Approaches (For Reference)
 
-### ❌ NVS Storage (Multiple Attempts)
+### NVS Storage (Multiple Attempts)
 **Reason**: NVS APIs are **not available in bootloader context**
 - `nvs_flash_init()`, `nvs_open()`, `nvs_get_blob()` cause linker errors
 - Bootloader has limited component dependencies
 - Multiple attempts with different approaches all failed
 
-### ❌ Standard ESP-IDF OTA (`esp_ota_set_boot_partition()`)
+### Standard ESP-IDF OTA (`esp_ota_set_boot_partition()`)
 **Reason**: `app_update` component requires `esp_system` which is **not available in bootloader**
 - `esp_ota_set_boot_partition()` only works in application context
 - Bootloader cannot depend on `app_update` component
 - Would require complex bootloader rebuild configuration
 
-### ❌ Custom Partition + Bootloader Flash APIs
-**Reason**: **Over-engineered** for simple use case
-- Would require custom partition management
-- More complex than necessary for single boot request
-- RTC register provides simpler, more reliable solution
-
 ## Successful Approaches
 
-### ✅ RTC Store Register (Current Implementation)
-**Works because**:
-- `LP_SYSTEM_REG_LP_STORE0_REG` is **reserved** in ESP32-P4 ROM
-- Direct register access available in bootloader
-- Survives reboots via RTC memory
-- No additional component dependencies needed
 
 ## Partition Layout
 
@@ -308,9 +305,3 @@ The RTC register protocol can be extended:
 - Add additional validation magic numbers
 - Implement request queuing if needed
 
-### Porting to Other ESP32 Chips
-For other ESP32 variants:
-- Check which RTC store registers are available/reserved
-- Update `LP_SYSTEM_REG_LP_STORE0_REG` to appropriate register
-- Verify register access in bootloader context
-- Test RTC register persistence across reboots

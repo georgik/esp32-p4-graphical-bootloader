@@ -267,7 +267,6 @@ static void show_bootloader_info(void) {
     ESP_LOGI(TAG, "=== ESP32-P4 Graphical Bootloader Information ===");
     ESP_LOGI(TAG, "Touch-enabled bootloader for ESP32-P4 Function EV Board");
     ESP_LOGI(TAG, "Built with Raylib graphics library");
-    ESP_LOGI(TAG, "Supports OTA partition switching");
     ESP_LOGI(TAG, "Select a GUI framework tile to boot the corresponding application");
     ESP_LOGI(TAG, "===================================================");
 
@@ -281,8 +280,8 @@ static void show_bootloader_info(void) {
 // Initialize tiles with their labels and colors
 void initialize_tiles(Tile* tiles, int screenWidth, int screenHeight) {
     const char* labels[TILE_COUNT] = {
-        "LVGL", "Embedded Wizard", "Slint", "Qt",
-        "Candera/CGI Studio", "Raylib", "SDL3", "Info"
+        "Demo 1", "Demo 2", "Demo 3", "Demo 4",
+        "Demo 5", "Demo 6", "Demo 7", "Info"
     };
 
     Color colors[TILE_COUNT] = {
