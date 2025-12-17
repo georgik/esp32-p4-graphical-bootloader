@@ -6,7 +6,7 @@
 class OTAAssemblyApp {
     constructor() {
         this.basePartitions = {
-            bootloader: { name: 'Bootloader', offset: 0x0, size: 0x20000, file: null, selected: true },
+            bootloader: { name: 'Bootloader', offset: 0x2000, size: 0x10000, file: null, selected: true },
             partition_table: { name: 'Partition Table', offset: 0x10000, size: 0x1000, file: null, selected: true, custom: false },
             factory: { name: 'Factory App', offset: 0x20000, size: 0x100000, file: null, selected: true },
             nvs: { name: 'NVS Storage', offset: 0x120000, size: 0x8000, file: null, selected: false },
@@ -19,6 +19,9 @@ class OTAAssemblyApp {
         this.nextOTAOffset = 0x330000; // Start after config partition
         this.otaCount = 0;
         this.maxOTAPartitions = 16;
+
+        // Initialize partition table generator
+        this.partitionTableGenerator = new window.PartitionTableGenerator();
 
         this.init();
     }
@@ -38,7 +41,46 @@ class OTAAssemblyApp {
         // Initialize memory map visualization
         this.updateMemoryMap();
 
+        // Update partition info displays with current values
+        this.updatePartitionInfoDisplays();
+
         console.log('OTA Assembly Tool initialized successfully');
+    }
+
+    updatePartitionInfoDisplays() {
+        // Update all partition info displays with current values from basePartitions
+        const partitionInfoElements = {
+            'bootloader': 'bootloader-info',
+            'partition_table': 'partition_table-info',
+            'factory': 'factory-info',
+            'nvs': 'nvs-info',
+            'otadata': 'otadata-info',
+            'config': 'config-info'
+        };
+
+        Object.entries(partitionInfoElements).forEach(([partitionKey, elementId]) => {
+            const element = document.getElementById(elementId);
+            const partition = this.basePartitions[partitionKey];
+
+            if (element && partition) {
+                const offsetHex = `0x${partition.offset.toString(16).toUpperCase()}`;
+                const sizeText = this.formatSize(partition.size);
+                element.textContent = `Offset: ${offsetHex}, Size: ${sizeText}`;
+            }
+        });
+    }
+
+    formatSize(bytes) {
+        const units = ['B', 'KB', 'MB', 'GB'];
+        let size = bytes;
+        let unitIndex = 0;
+
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex++;
+        }
+
+        return `${size}${units[unitIndex]}`;
     }
 
     initDragAndDrop() {
@@ -59,9 +101,10 @@ class OTAAssemblyApp {
 
     initFileInputs() {
         // Handle file input changes
-        ['bootloader', 'factory', 'nvs', 'otadata', 'config'].forEach(partition => {
+        ['bootloader', 'partition_table', 'factory', 'nvs', 'otadata', 'config'].forEach(partition => {
             const input = document.getElementById(`${partition}-file`);
             if (input) {
+                console.log(`Adding file input listener for ${partition}`);
                 input.addEventListener('change', (e) => {
                     this.handleFileSelect(partition, e.target.files[0]);
                 });
@@ -139,12 +182,16 @@ class OTAAssemblyApp {
     }
 
     async handleFileSelect(partition, file) {
+        console.log(`handleFileSelect called for partition: ${partition}, file: ${file?.name}`);
+
         if (!file || !file.name.toLowerCase().endsWith('.bin')) {
             this.showError('Please select a valid .bin file');
             return;
         }
 
         try {
+            console.log(`Processing file: ${file.name}, size: ${file.size} bytes for partition: ${partition}`);
+
             // Validate the binary file
             const validation = await this.validateBinary(file, partition);
             if (!validation.valid) {
@@ -154,8 +201,10 @@ class OTAAssemblyApp {
 
             // Store the file
             this.basePartitions[partition].file = file;
+            console.log(`File stored for ${partition}:`, this.basePartitions[partition].file?.name);
 
             // Update UI
+            console.log(`Updating UI for ${partition}...`);
             this.updatePartitionUI(partition);
             this.updateMemoryMap();
 
@@ -283,10 +332,15 @@ class OTAAssemblyApp {
 
     updatePartitionUI(partition) {
         const zone = document.querySelector(`[data-partition="${partition}"]`);
+        console.log(`updatePartitionUI called for ${partition}, zone found: ${!!zone}`);
+
         if (!zone) return;
 
         const file = this.basePartitions[partition].file;
+        console.log(`File for ${partition}:`, file?.name, file?.size);
+
         if (file) {
+            console.log(`Setting UI to show file: ${file.name}`);
             zone.innerHTML = `
                 <div class="selected-file">
                     <i class="fas fa-file-binary me-2"></i>
@@ -296,6 +350,7 @@ class OTAAssemblyApp {
             `;
             zone.classList.add('valid-drop');
         } else {
+            console.log(`No file for ${partition}, showing drop prompt`);
             zone.innerHTML = `<span class="drop-text">Drop ${partition}.bin here or click to browse</span>`;
             zone.classList.remove('valid-drop');
         }
@@ -620,6 +675,13 @@ class OTAAssemblyApp {
 
     // Binary validation using BinaryValidator class
     async validateBinary(file, partition) {
+        console.log(`Validating ${file.name} for partition: ${partition}`);
+
+        // Special handling for partition table validation
+        if (partition === 'partition_table') {
+            return await this.validatePartitionTable(file);
+        }
+
         if (!window.BinaryValidator) {
             console.warn('BinaryValidator not available, using basic validation');
             return {
@@ -642,6 +704,63 @@ class OTAAssemblyApp {
                 valid: false,
                 error: error.message,
                 warnings: []
+            };
+        }
+    }
+
+    async validatePartitionTable(file) {
+        try {
+            const buffer = await file.arrayBuffer();
+            const data = new Uint8Array(buffer);
+
+            console.log(`Partition table validation: file size ${data.length} bytes`);
+
+            // Check minimum size (at least 32 bytes for basic partition table)
+            if (data.length < 32) {
+                return {
+                    valid: false,
+                    warnings: [],
+                    error: 'Partition table too small (minimum 32 bytes required)'
+                };
+            }
+
+            // Check magic number (ESP32 uses little-endian: 0x50aa which is AA50 in big-endian display)
+            const magicNumber = data[0] | (data[1] << 8);
+            console.log(`Partition table magic number: 0x${magicNumber.toString(16)}`);
+
+            if (magicNumber !== 0x50aa) {
+                return {
+                    valid: false,
+                    warnings: [],
+                    error: `Invalid partition table magic number. Expected 0x50aa, got 0x${magicNumber.toString(16)}`
+                };
+            }
+
+            // Check if size is reasonable (multiple of 32 bytes)
+            if (data.length % 32 !== 0) {
+                return {
+                    valid: false,
+                    warnings: [],
+                    error: 'Partition table size must be a multiple of 32 bytes'
+                };
+            }
+
+            // Count partition entries
+            const entryCount = Math.floor(data.length / 32) - 1; // -1 for header
+            console.log(`Partition table appears to have ${entryCount} entries`);
+
+            return {
+                valid: true,
+                warnings: [],
+                error: null
+            };
+
+        } catch (error) {
+            console.error('Partition table validation error:', error);
+            return {
+                valid: false,
+                warnings: [],
+                error: `Failed to validate partition table: ${error.message}`
             };
         }
     }
@@ -1393,19 +1512,23 @@ class OTAAssemblyApp {
         const dropZone = document.querySelector('[data-partition="partition_table"]');
         const partition = this.basePartitions.partition_table;
 
+        console.log(`toggleCustomPartitionTable called. isCustom: ${isCustom}, checkbox.checked: ${document.getElementById('partition_table_custom').checked}`);
+
         partition.custom = isCustom;
 
         if (isCustom) {
             browseBtn.disabled = false;
-            if (dropZone) {
-                dropZone.innerHTML = '<span class="drop-text">Drop custom partition-table.bin here or click to browse</span>';
-            }
+            console.log('Custom mode enabled, updating UI...');
+            // Update UI to show file if loaded, or prompt to drop file
+            this.updatePartitionUI('partition_table');
         } else {
             browseBtn.disabled = true;
             // Clear any custom file
             partition.file = null;
+            console.log('Custom mode disabled, clearing file and showing auto-generated text');
             if (dropZone) {
                 dropZone.innerHTML = '<span class="drop-text">Auto-generated from selections</span>';
+                dropZone.classList.remove('valid-drop');
             }
         }
 
@@ -1647,19 +1770,19 @@ class OTAAssemblyApp {
                 if (!offset) {
                     switch (partition.name) {
                         case 'Bootloader':
-                            offset = 0x0;
+                            offset = 0x2000;  // ESP-IDF standard bootloader offset
                             break;
                         case 'Partition Table':
-                            offset = 0x8000;
+                            offset = 0x10000; // ESP-IDF standard partition table offset
                             break;
                         case 'Factory App':
-                            offset = 0x10000;
+                            offset = 0x20000; // ESP-IDF standard factory app offset
                             break;
                         default:
                             if (partition.name.startsWith('ota_')) {
                                 offset = 0x10000 + (parseInt(partition.name.split('_')[1]) * 0x100000);
                             } else {
-                                offset = 0x0;
+                                offset = 0x2000; // Default to bootloader offset
                             }
                             break;
                     }
@@ -1754,6 +1877,99 @@ class OTAAssemblyApp {
             this.showError(`Failed to create complete image: ${error.message}`);
         }
     }
+
+    async downloadPartitionTableBinary() {
+        try {
+            // Check if custom partition table file is loaded
+            if (this.basePartitions.partition_table.file) {
+                // Use the loaded custom partition table file
+                const file = this.basePartitions.partition_table.file;
+                const fileData = new Uint8Array(await file.arrayBuffer());
+
+                console.log(`Downloading custom partition table: ${file.name} (${fileData.length} bytes)`);
+
+                const blob = new Blob([fileData], { type: 'application/octet-stream' });
+                const url = URL.createObjectURL(blob);
+
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = 'partition-table.bin';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+
+                this.showSuccess('Custom partition table downloaded successfully');
+            } else {
+                // Generate partition table from current selections
+                console.log('Generating partition table from selections...');
+                const partitionTable = this.generatePartitionTableFromSelections();
+
+                if (partitionTable.entries.length === 0) {
+                    this.showError('No partitions selected for partition table generation');
+                    return;
+                }
+
+                // Convert to binary format
+                const binaryData = this.partitionTableGenerator.generatePartitionTableBinary(partitionTable);
+
+                const blob = new Blob([binaryData], { type: 'application/octet-stream' });
+                const url = URL.createObjectURL(blob);
+
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = 'partition-table.bin';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+
+                this.showSuccess(`Generated partition table with ${partitionTable.entries.length} entries downloaded successfully`);
+            }
+        } catch (error) {
+            console.error('Failed to download partition table:', error);
+            this.showError(`Failed to download partition table: ${error.message}`);
+        }
+    }
+
+    generatePartitionTableFromSelections() {
+        const partitions = [];
+
+        // Add selected base partitions (excluding bootloader itself)
+        Object.entries(this.basePartitions).forEach(([key, config]) => {
+            if (config.selected && key !== 'bootloader') {
+                const hasFile = !!config.file;
+                partitions.push({
+                    name: this.partitionTableGenerator.getESPIDFPartitionName(key),
+                    type: this.partitionTableGenerator.getPartitionType(key),
+                    subtype: this.partitionTableGenerator.getPartitionSubtype(key),
+                    offset: config.offset,
+                    size: hasFile ? this.partitionTableGenerator.alignPartitionSize(config.file.size, key) : this.partitionTableGenerator.getDefaultPartitionSize(key),
+                    flags: this.partitionTableGenerator.getPartitionFlags(key)
+                });
+            }
+        });
+
+        // Add selected OTA partitions
+        this.otaPartitions.forEach(ota => {
+            if (ota.selected) {
+                const hasFile = !!ota.file;
+                partitions.push({
+                    name: ota.name,
+                    type: 'app',
+                    subtype: ota.name.replace('ota_', 'ota_'),
+                    offset: ota.offset,
+                    size: hasFile ? this.partitionTableGenerator.alignPartitionSize(ota.file.size, 'ota') : this.partitionTableGenerator.getDefaultPartitionSize('ota'),
+                    flags: '0x0'
+                });
+            }
+        });
+
+        return {
+            entries: partitions,
+            md5Sum: this.partitionTableGenerator.md5SumPlaceholder
+        };
+    }
 }
 
 // Global functions for onclick handlers
@@ -1766,12 +1982,14 @@ window.toggleBasePartition = (partition) => window.app?.toggleBasePartition(part
 window.toggleCustomPartitionTable = () => window.app?.toggleCustomPartitionTable();
 window.toggleOTAPartition = (otaId) => window.app?.toggleOTAPartition(otaId);
 window.removeOTAPartition = (otaId) => window.app?.removeOTAPartition(otaId);
+
 window.saveConfiguration = () => window.app?.saveConfiguration();
 window.loadConfiguration = () => window.app?.loadConfiguration();
 window.selectAllPartitions = () => window.app?.selectAllPartitions();
 window.deselectAllPartitions = () => window.app?.deselectAllPartitions();
 window.flashSelected = () => window.app?.flashSelected();
 window.downloadCompleteImage = () => window.app?.downloadCompleteImage();
+window.downloadPartitionTableBinary = () => window.app?.downloadPartitionTableBinary();
 
 // Initialize the application when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
