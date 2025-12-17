@@ -330,6 +330,17 @@ class FlashingController {
                 }
                 // Wait a moment to see if device responds
                 await new Promise(resolve => setTimeout(resolve, 500));
+
+                // Start monitoring device output after reset
+                console.log('[FLASH] Starting device monitoring...');
+                if (this.terminal) {
+                    this.terminal.writeln(`\x1b[36m[Monitor] Starting device monitoring...\x1b[0m`);
+                    this.terminal.writeln(`\x1b[36m[Monitor] Listening for device output... Press Ctrl+C to stop\x1b[0m`);
+                    this.terminal.writeln('');
+                }
+
+                // Start serial monitoring
+                await this.startSerialMonitoring();
                 break; // Success, no need to try more strategies
             } catch (error) {
                 console.log(`[FLASH] ${strategy.name} failed:`, error.message);
@@ -404,6 +415,127 @@ class FlashingController {
      */
     async sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
+     * Start serial monitoring to capture device output
+     */
+    async startSerialMonitoring() {
+        console.log('[FLASH] startSerialMonitoring() called');
+
+        if (!this.port || !this.port.readable) {
+            console.log('[FLASH] ERROR: Port not available for reading');
+            if (this.terminal) {
+                this.terminal.writeln(`\x1b[31m[Monitor] ERROR: Port not available for reading\x1b[0m`);
+            }
+            return;
+        }
+
+        try {
+            // Clear any existing input buffer
+            if (this.terminal) {
+                this.terminal.writeln(`\x1b[90m[Monitor] Clearing input buffer...\x1b[0m`);
+            }
+
+            // Start reading from device
+            await this.readSerialOutput();
+
+        } catch (error) {
+            console.log('[FLASH] Error starting serial monitoring:', error);
+            if (this.terminal) {
+                this.terminal.writeln(`\x1b[31m[Monitor] ERROR: Failed to start monitoring: ${error.message}\x1b[0m`);
+            }
+        }
+    }
+
+    /**
+     * Read and display serial output from device
+     */
+    async readSerialOutput() {
+        console.log('[FLASH] readSerialOutput() called');
+
+        if (!this.port || !this.port.readable) {
+            return;
+        }
+
+        try {
+            // Get the reader
+            const reader = this.port.readable.getReader();
+            console.log('[FLASH] Serial reader created successfully');
+
+            // Set up monitoring flag
+            this.monitoringActive = true;
+            let buffer = '';
+
+            // Read continuously
+            while (this.monitoringActive) {
+                try {
+                    const { value, done } = await reader.read();
+
+                    if (done) {
+                        console.log('[FLASH] Serial reading completed');
+                        break;
+                    }
+
+                    if (value && value.length > 0) {
+                        // Convert bytes to text
+                        const text = new TextDecoder().decode(value);
+                        buffer += text;
+
+                        // Process complete lines
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || ''; // Keep incomplete line
+
+                        for (const line of lines) {
+                            if (line.trim()) {
+                                // Display in console
+                                console.log('[DEVICE]', line);
+
+                                // Display in terminal
+                                if (this.terminal) {
+                                    // Remove any control characters except newline and carriage return
+                                    const cleanLine = line.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+                                    this.terminal.writeln(cleanLine);
+                                }
+                            }
+                        }
+                    }
+                } catch (readError) {
+                    if (readError.name === 'NetworkError' && readError.message.includes('device has been lost')) {
+                        console.log('[FLASH] Device disconnected during monitoring');
+                        if (this.terminal) {
+                            this.terminal.writeln(`\x1b[31m[Monitor] Device disconnected\x1b[0m`);
+                        }
+                        break;
+                    } else {
+                        console.log('[FLASH] Read error during monitoring:', readError);
+                        // Continue reading for other errors
+                    }
+                }
+            }
+
+            reader.releaseLock();
+            console.log('[FLASH] Serial reader released');
+
+        } catch (error) {
+            console.log('[FLASH] Error in readSerialOutput:', error);
+            if (this.terminal) {
+                this.terminal.writeln(`\x1b[31m[Monitor] Error reading from device: ${error.message}\x1b[0m`);
+            }
+        }
+    }
+
+    /**
+     * Stop serial monitoring
+     */
+    stopSerialMonitoring() {
+        console.log('[FLASH] stopSerialMonitoring() called');
+        this.monitoringActive = false;
+
+        if (this.terminal) {
+            this.terminal.writeln(`\x1b[33m[Monitor] Monitoring stopped\x1b[0m`);
+            this.terminal.writeln('');
+        }
     }
 
     async debugPortCapabilities() {

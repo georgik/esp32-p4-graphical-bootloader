@@ -369,6 +369,193 @@ class OTAAssemblyApp {
         } else {
             container.innerHTML = '<div class="text-muted">No partitions loaded yet</div>';
         }
+
+        // Update flashing commands dynamically whenever partitions change
+        this.updateFlashingCommands();
+
+        // Update size statistics
+        this.updateSizeStatistics();
+    }
+
+    /**
+     * Update flashing commands dynamically without needing full partition table generation
+     */
+    updateFlashingCommands() {
+        const flashingCommandsElement = document.getElementById('flashing-commands');
+        const partitionArgsElement = document.getElementById('partition-args');
+        const espflashPartitionArgsElement = document.getElementById('espflash-partition-args');
+
+        if (!flashingCommandsElement || !partitionArgsElement) {
+            return;
+        }
+
+        // Generate partition arguments for individual flashing
+        const partitionArgs = [];
+        const espflashPartitionArgs = [];
+
+        // Add base partitions with files
+        Object.entries(this.basePartitions).forEach(([key, partition]) => {
+            if (partition.selected && partition.file) {
+                const offsetHex = partition.offset.toString(16).padStart(8, '0');
+                const fileName = partition.file.name;
+                partitionArgs.push(`0x${offsetHex} ${fileName}`);
+                espflashPartitionArgs.push(`${offsetHex} ${fileName}`);
+            }
+        });
+
+        // Add OTA partitions with files
+        this.otaPartitions.forEach(otaPartition => {
+            if (otaPartition.selected && otaPartition.file) {
+                const offsetHex = otaPartition.offset.toString(16).padStart(8, '0');
+                const fileName = otaPartition.fileName || `ota_${otaPartition.id}.bin`;
+                partitionArgs.push(`0x${offsetHex} ${fileName}`);
+                espflashPartitionArgs.push(`${offsetHex} ${fileName}`);
+            }
+        });
+
+        // Update partition arguments display
+        if (partitionArgs.length > 0) {
+            // Generate the complete esptool.py flashing command
+            const esptoolBaseCommand = 'python -m esptool --chip esp32p4 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 80m';
+            const esptoolCompleteCommand = `${esptoolBaseCommand} ${partitionArgs.join(' ')}`;
+
+            // Generate the complete espflash command
+            const espflashBaseCommand = 'espflash --chip esp32p4 --baud 460800';
+            const espflashCompleteCommand = `${espflashBaseCommand} ${espflashPartitionArgs.join(' ')}`;
+
+            partitionArgsElement.innerHTML = `
+                <div class="command-block bg-dark text-light p-3 rounded font-monospace small" style="word-break: break-all; white-space: pre-wrap;">
+                    <h6 class="text-warning mb-2">
+                        <i class="fab fa-python me-1"></i>Complete esptool.py Command:
+                    </h6>
+                    <code style="word-wrap: break-word;">${esptoolCompleteCommand}</code>
+                </div>
+
+                <div class="mt-3">
+                    <h6 class="text-info mb-2">
+                        <i class="fas fa-list me-1"></i>Individual Partitions:
+                    </h6>
+                    <div class="command-block bg-light border-start border-4 border-primary p-2 rounded font-monospace small">
+                        <code>${partitionArgs.join(' \\\n    ')}</code>
+                    </div>
+                </div>
+            `;
+
+            // Update espflash partition arguments
+            if (espflashPartitionArgsElement) {
+                espflashPartitionArgsElement.innerHTML = `
+                    <div class="command-block bg-dark text-light p-3 rounded font-monospace small" style="word-break: break-all; white-space: pre-wrap;">
+                        <h6 class="text-warning mb-2">
+                            <i class="fas fa-bolt me-1"></i>Complete espflash Command:
+                        </h6>
+                        <code style="word-wrap: break-word;">${espflashCompleteCommand}</code>
+                    </div>
+
+                    <div class="mt-3">
+                        <h6 class="text-info mb-2">
+                            <i class="fas fa-list me-1"></i>Individual Partitions:
+                        </h6>
+                        <div class="command-block bg-light border-start border-4 border-warning p-2 rounded font-monospace small">
+                            <code>${espflashPartitionArgs.join(' \\\n    ')}</code>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Show the complete image commands
+            document.getElementById('espflash-individual-command').textContent = espflashBaseCommand;
+            document.getElementById('individual-flash-command').textContent = esptoolBaseCommand;
+
+        } else {
+            partitionArgsElement.innerHTML = `
+                <div class="alert alert-warning small mb-0">
+                    <i class="fas fa-exclamation-triangle me-1"></i>
+                    No partitions with files selected. Load partition files first to generate flashing commands.
+                </div>
+            `;
+
+            if (espflashPartitionArgsElement) {
+                espflashPartitionArgsElement.innerHTML = `
+                    <div class="alert alert-warning small mb-0">
+                        <i class="fas fa-exclamation-triangle me-1"></i>
+                    No partitions with files selected. Load partition files first to generate flashing commands.
+                    </div>
+                `;
+            }
+        }
+
+        // Show the flashing commands section
+        flashingCommandsElement.style.display = 'block';
+    }
+
+    /**
+     * Update size statistics dynamically
+     */
+    updateSizeStatistics() {
+        const statsElement = document.getElementById('partition-table-stats');
+        if (!statsElement) return;
+
+        let selectedSize = 0;
+        let selectedCount = 0;
+        let withFilesSize = 0;
+        let withFilesCount = 0;
+
+        // Calculate base partitions statistics
+        Object.entries(this.basePartitions).forEach(([key, partition]) => {
+            if (partition.selected) {
+                selectedCount++;
+                selectedSize += partition.actualSize;
+
+                if (partition.file) {
+                    withFilesCount++;
+                    withFilesSize += partition.file.size;
+                }
+            }
+        });
+
+        // Calculate OTA partitions statistics
+        this.otaPartitions.forEach(otaPartition => {
+            if (otaPartition.selected) {
+                selectedCount++;
+                selectedSize += otaPartition.actualSize;
+
+                if (otaPartition.file) {
+                    withFilesCount++;
+                    withFilesSize += otaPartition.file.size;
+                }
+            }
+        });
+
+        // Update the statistics display
+        const utilization = this.totalFlashSize > 0 ? (selectedSize / this.totalFlashSize * 100).toFixed(1) : 0;
+        statsElement.innerHTML = `
+            <div class="row text-center">
+                <div class="col-md-3">
+                    <div class="stat-item">
+                        <div class="stat-number">${selectedCount}</div>
+                        <div class="stat-label">Selected Partitions</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="stat-item">
+                        <div class="stat-number">${this.formatSize(selectedSize)}</div>
+                        <div class="stat-label">Selected Size</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="stat-item">
+                        <div class="stat-number">${withFilesCount}</div>
+                        <div class="stat-label">With Files</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="stat-item">
+                        <div class="stat-number">${utilization}%</div>
+                        <div class="stat-label">Flash Utilization</div>
+                    </div>
+                </div>
+            </div>
+        `;
     }
 
     generateMemoryMapHTML(blocks) {
@@ -550,6 +737,7 @@ class OTAAssemblyApp {
     displayFlashingCommands(partitionTable) {
         const flashingCommandsElement = document.getElementById('flashing-commands');
         const partitionArgsElement = document.getElementById('partition-args');
+        const espflashPartitionArgsElement = document.getElementById('espflash-partition-args');
 
         if (!flashingCommandsElement || !partitionArgsElement) {
             return;
@@ -557,6 +745,7 @@ class OTAAssemblyApp {
 
         // Generate partition arguments for individual flashing
         const partitionArgs = [];
+        const espflashPartitionArgs = [];
 
         // Add base partitions with files
         Object.entries(this.basePartitions).forEach(([key, partition]) => {
@@ -564,6 +753,7 @@ class OTAAssemblyApp {
                 const offsetHex = partition.offset.toString(16).padStart(8, '0');
                 const fileName = partition.file.name;
                 partitionArgs.push(`0x${offsetHex} ${fileName}`);
+                espflashPartitionArgs.push(`--partition-table-offset ${offsetHex} ${fileName}`);
             }
         });
 
@@ -573,37 +763,62 @@ class OTAAssemblyApp {
                 const offsetHex = otaPartition.offset.toString(16).padStart(8, '0');
                 const fileName = otaPartition.fileName || `ota_${otaPartition.id}.bin`;
                 partitionArgs.push(`0x${offsetHex} ${fileName}`);
+                espflashPartitionArgs.push(`--partition-table-offset ${offsetHex} ${fileName}`);
             }
         });
 
         // Update partition arguments display
         if (partitionArgs.length > 0) {
-            // Generate the complete flashing command
-            const baseCommand = 'python -m esptool --chip esp32p4 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 80m';
-            const completeCommand = `${baseCommand} ${partitionArgs.join(' ')}`;
+            // Generate the complete esptool.py flashing command
+            const esptoolBaseCommand = 'python -m esptool --chip esp32p4 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 80m';
+            const esptoolCompleteCommand = `${esptoolBaseCommand} ${partitionArgs.join(' ')}`;
+
+            // Generate the complete espflash command
+            const espflashBaseCommand = 'espflash --chip esp32p4 --baud 460800';
+            const espflashCompleteCommand = `${espflashBaseCommand} ${partitionArgs.join(' ')}`;
 
             partitionArgsElement.innerHTML = `
                 <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
                     <h6 class="text-warning mb-2">
-                        <i class="fas fa-terminal me-1"></i>Complete Manual Flashing Command:
+                        <i class="fab fa-python me-1"></i>Complete esptool.py Command:
                     </h6>
-                    <code>${completeCommand}</code>
+                    <code>${esptoolCompleteCommand}</code>
                 </div>
 
                 <div class="mt-3">
                     <h6 class="text-info mb-2">
-                        <i class="fas fa-list me-1"></i>Individual Partition Arguments:
+                        <i class="fas fa-list me-1"></i>Individual Partitions:
                     </h6>
                     <div class="command-block bg-light border-start border-4 border-primary p-2 rounded font-monospace small">
                         <code>${partitionArgs.join(' \\\n    ')}</code>
                     </div>
                 </div>
-
-                <p class="text-muted mt-2 small mb-0">
-                    <i class="fas fa-info-circle me-1"></i>
-                    <strong>Usage:</strong> Copy the complete command above and run it in your terminal after installing esptool (<code>pip install esptool</code>)
-                </p>
             `;
+
+            // Update espflash partition arguments
+            if (espflashPartitionArgsElement) {
+                espflashPartitionArgsElement.innerHTML = `
+                    <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
+                        <h6 class="text-warning mb-2">
+                            <i class="fas fa-bolt me-1"></i>Complete espflash Command:
+                        </h6>
+                        <code>${espflashCompleteCommand}</code>
+                    </div>
+
+                    <div class="mt-3">
+                        <h6 class="text-info mb-2">
+                            <i class="fas fa-list me-1"></i>Individual Partitions (espflash format):
+                        </h6>
+                        <div class="command-block bg-light border-start border-4 border-warning p-2 rounded font-monospace small">
+                            <code>${partitionArgs.map(arg => {
+                                const [offset, file] = arg.split(' ');
+                                return `--partition-table-offset ${offset} ${file}`;
+                            }).join(' \\\n    ')}</code>
+                        </div>
+                    </div>
+                `;
+            }
+
         } else {
             partitionArgsElement.innerHTML = `
                 <div class="alert alert-warning small mb-0">
@@ -611,6 +826,15 @@ class OTAAssemblyApp {
                     No partitions with files selected. Load partition files first to generate flashing commands.
                 </div>
             `;
+
+            if (espflashPartitionArgsElement) {
+                espflashPartitionArgsElement.innerHTML = `
+                    <div class="alert alert-warning small mb-0">
+                        <i class="fas fa-exclamation-triangle me-1"></i>
+                    No partitions with files selected. Load partition files first to generate flashing commands.
+                    </div>
+                `;
+            }
         }
 
         // Show the flashing commands section
@@ -668,11 +892,7 @@ class OTAAssemblyApp {
         this.showSuccess('OTA partitions deselected');
     }
 
-    flashSelected() {
-        // This will be implemented in flashing-controller.js
-        console.log('Flashing selected partitions...');
-    }
-
+    
     saveConfiguration() {
         // Save current configuration to JSON
         const config = {
@@ -888,9 +1108,28 @@ class OTAAssemblyApp {
         // Fit terminal to container
         this.fitAddon.fit();
 
+        // Add keyboard handler for Ctrl+C to stop monitoring
+        this.terminal.onKey((event) => {
+            // Check for Ctrl+C (keyCode 67, ctrlKey true, or char 'c' with ctrl)
+            if ((event.key === '\u0003') || // Ctrl+C generates ETX (End of Text) character
+                (event.domEvent && event.domEvent.ctrlKey && event.domEvent.key === 'c')) {
+
+                console.log('[MAIN] Ctrl+C pressed - stopping monitoring');
+
+                // Stop monitoring if active
+                if (this.flashingController && this.flashingController.monitoringActive) {
+                    this.flashingController.stopSerialMonitoring();
+                    this.terminal.writeln('\x1b[33m[Monitor] Stopped by Ctrl+C\x1b[0m');
+                }
+
+                return; // Don't send Ctrl+C to device
+            }
+        });
+
         // Welcome message
         this.terminal.writeln('\x1b[32mESP32-P4 Serial Console\x1b[0m');
         this.terminal.writeln('Ready for device communication...');
+        this.terminal.writeln('');
         this.terminal.writeln('');
 
         // Handle window resize
@@ -1173,48 +1412,81 @@ class OTAAssemblyApp {
     }
 
     async flashSelected() {
+        console.log('[MAIN] ==================================================================');
+        console.log('[MAIN] flashSelected() called');
+        console.log('[MAIN] ==================================================================');
+
         try {
             // Collect selected partitions to flash
+            console.log('[MAIN] Collecting selected partitions...');
             const selectedPartitions = this.getSelectedPartitions();
+            console.log('[MAIN] Selected partitions:', selectedPartitions);
 
             if (selectedPartitions.length === 0) {
+                console.log('[MAIN] ERROR: No partitions selected for flashing');
                 this.showError('No partitions selected for flashing');
                 return;
             }
 
+            console.log(`[MAIN] Found ${selectedPartitions.length} partitions to flash`);
+
             // Check if device is connected, if not, auto-connect
+            console.log('[MAIN] Checking device connection...');
+            console.log('[MAIN] Flashing controller exists:', !!this.flashingController);
+            console.log('[MAIN] Is connected:', this.flashingController?.isConnected?.());
+
             if (!this.flashingController || !this.flashingController.isConnected()) {
+                console.log('[MAIN] Device not connected. Auto-connecting...');
                 this.showMessage('Device not connected. Connecting first...', 'info');
 
                 // Initialize flashing controller if needed
                 if (!this.flashingController) {
+                    console.log('[MAIN] Initializing new flashing controller...');
                     this.flashingController = new window.FlashingController();
+                    console.log('[MAIN] Flashing controller created:', this.flashingController);
                 }
 
                 try {
+                    console.log('[MAIN] Attempting to connect to device...');
                     await this.flashingController.connect();
+                    console.log('[MAIN] Device connected successfully');
+
                     // Update body class for connected state
                     document.body.classList.remove('disconnected');
                     document.body.classList.add('connected');
 
                     this.showSuccess('Connected to device successfully');
                 } catch (error) {
+                    console.log('[MAIN] ERROR: Failed to connect to device:', error);
                     this.showError(`Failed to connect: ${error.message}`);
                     return;
                 }
+            } else {
+                console.log('[MAIN] Device already connected');
             }
 
             // Show console page for flashing output
+            console.log('[MAIN] Showing console for flashing output...');
             this.showConsole();
 
             // Wait a moment for console to initialize
+            console.log('[MAIN] Waiting 500ms for console to initialize...');
             setTimeout(async () => {
-                await this.performFlashing(selectedPartitions);
+                console.log('[MAIN] Starting actual flashing process...');
+                try {
+                    await this.performFlashing(selectedPartitions);
+                } catch (flashError) {
+                    console.log('[MAIN] ERROR during flashing:', flashError);
+                    this.showError(`Flashing failed: ${flashError.message}`);
+                }
             }, 500);
 
         } catch (error) {
+            console.log('[MAIN] ERROR in flashSelected:', error);
             this.showError(`Flash failed: ${error.message}`);
         }
+
+        console.log('[MAIN] ==================================================================');
     }
 
     showConsole() {
@@ -1229,33 +1501,57 @@ class OTAAssemblyApp {
     }
 
     async performFlashing(partitions) {
+        console.log('[MAIN] ==================================================================');
+        console.log('[MAIN] performFlashing() called');
+        console.log('[MAIN] Partitions to flash:', partitions);
+        console.log('[MAIN] ==================================================================');
+
         try {
             // Initialize flashing controller if needed
+            console.log('[MAIN] Checking flashing controller...');
             if (!this.flashingController) {
+                console.log('[MAIN] Creating new flashing controller...');
                 this.flashingController = new window.FlashingController();
+                console.log('[MAIN] Flashing controller created for flashing');
             }
 
             // Set terminal for output
+            console.log('[MAIN] Setting terminal for output...');
             if (this.terminal) {
+                console.log('[MAIN] Terminal found, setting to flashing controller');
                 this.flashingController.setTerminal(this.terminal);
+            } else {
+                console.log('[MAIN] WARNING: No terminal available for output');
             }
 
             // Show what will be flashed
             const partitionList = partitions.map(p => `${p.name} (${this.formatSize(p.file?.size || 0)})`).join(', ');
+            console.log('[MAIN] Flashing partitions:', partitionList);
+
             if (this.terminal) {
                 this.terminal.writeln(`\x1b[36mStarting flash process for: ${partitionList}\x1b[0m`);
                 this.terminal.writeln('');
             }
 
             // Enter bootloader mode first
+            console.log('[MAIN] Entering bootloader mode...');
             if (this.terminal) {
                 this.terminal.writeln(`\x1b[33m[Bootloader] Entering bootloader mode...\x1b[0m`);
             }
             await this.flashingController.enterBootloaderMode();
+            console.log('[MAIN] Bootloader mode entered successfully');
 
             // Flash each partition using real ESP32 protocol
+            console.log(`[MAIN] Starting to flash ${partitions.length} partitions...`);
             for (let i = 0; i < partitions.length; i++) {
                 const partition = partitions[i];
+                console.log(`[MAIN] Flashing partition ${i + 1}/${partitions.length}: ${partition.name}`);
+                console.log(`[MAIN] Partition details:`, {
+                    name: partition.name,
+                    size: partition.file?.size || 0,
+                    offset: partition.offset,
+                    hasFile: !!partition.file
+                });
 
                 if (this.terminal) {
                     this.terminal.writeln(`\x1b[33m[Flashing] ${partition.name}\x1b[0m`);
@@ -1264,9 +1560,12 @@ class OTAAssemblyApp {
                 }
 
                 try {
+                    console.log(`[MAIN] Reading file data for ${partition.name}...`);
                     // Read file data
                     const fileData = await partition.file.arrayBuffer();
+                    console.log(`[MAIN] File data read, size: ${fileData.byteLength} bytes`);
 
+                    console.log(`[MAIN] Starting flash operation for ${partition.name}...`);
                     // Flash the partition using real ESP32 protocol
                     const result = await this.flashingController.flashBinary(
                         partition.offset,
@@ -1274,16 +1573,21 @@ class OTAAssemblyApp {
                         partition.name
                     );
 
+                    console.log(`[MAIN] Flash result for ${partition.name}:`, result);
+
                     if (result && result.bytesWritten > 0) {
+                        console.log(`[MAIN] ✓ ${partition.name} flashed successfully, ${result.bytesWritten} bytes`);
                         if (this.terminal) {
                             this.terminal.writeln('\n\x1b[32m  ✓ Flash completed\x1b[0m');
                             this.terminal.writeln(`  Bytes written: ${this.formatSize(result.bytesWritten)}`);
                         }
                     } else {
+                        console.log(`[MAIN] ✗ ${partition.name} flash failed: No bytes written`);
                         throw new Error('No bytes written - flash may have failed');
                     }
 
                 } catch (flashError) {
+                    console.log(`[MAIN] ERROR: Flash failed for ${partition.name}:`, flashError);
                     if (this.terminal) {
                         this.terminal.writeln(`\n\x1b[31m  ✗ Flash failed: ${flashError.message}\x1b[0m`);
                     }
@@ -1293,6 +1597,7 @@ class OTAAssemblyApp {
                 if (this.terminal) {
                     this.terminal.writeln('');
                 }
+                console.log(`[MAIN] Completed flashing ${partition.name}`);
             }
 
             // Verify flash if available

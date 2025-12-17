@@ -134,11 +134,25 @@
             border-radius: 6px;
             white-space: pre-wrap;
             word-break: break-all;
+            overflow-x: hidden;
         }
 
         .command-block code {
             white-space: pre-wrap;
             word-break: break-all;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            max-width: 100%;
+        }
+
+        /* Prevent table layout issues */
+        .card-body {
+            overflow-x: auto;
+        }
+
+        /* Ensure command blocks don't overflow cards */
+        .card {
+            overflow: hidden;
         }
 
         .stat-item {
@@ -447,11 +461,11 @@
                             <textarea id="partition-table-csv" class="form-control" rows="10" readonly placeholder="Partition table will appear here after clicking 'Generate Partition Table'"></textarea>
 
                             <!-- Partition Table Statistics -->
-                            <div id="partition-table-stats" class="mt-3" style="display: none;">
+                            <div id="partition-table-stats" class="mt-3" style="display: block;">
                                 <div class="card">
                                     <div class="card-body">
                                         <h6 class="card-title mb-3">Partition Statistics</h6>
-                                        <div class="stat-container" style="display: flex; justify-content: space-around; align-items: center;">
+                                        <div class="stat-container">
                                             <!-- Stats will be inserted here -->
                                         </div>
                                     </div>
@@ -459,52 +473,122 @@
                             </div>
 
                             <!-- Flashing Commands -->
-                            <div id="flashing-commands" class="mt-3" style="display: none;">
+                            <div id="flashing-commands" class="mt-3" style="display: block;">
                                 <div class="card">
                                     <div class="card-body">
                                         <h6 class="card-title mb-3">
-                                            <i class="fas fa-terminal me-2"></i>Flashing Commands
+                                            <i class="fas fa-terminal me-2"></i>Manual Flashing Instructions
                                         </h6>
-                                        <p class="text-muted mb-3">Use these commands with esptool.py to flash the complete firmware image:</p>
+                                        <p class="text-muted mb-4">Use these commands to flash your firmware manually from the command line:</p>
 
-                                        <!-- Individual Partitions Command -->
+                                        <!-- espflash Commands (First - Recommended) -->
                                         <div class="mb-4">
-                                            <h6 class="text-primary mb-2">
-                                                <i class="fas fa-microchip me-1"></i>Flash Individual Partitions
+                                            <h6 class="text-warning mb-3">
+                                                <i class="fas fa-bolt me-1"></i>Using espflash (Recommended)
                                             </h6>
-                                            <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
-                                                <code id="individual-flash-command">python -m esptool --chip esp32p4 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 80m</code>
+
+                                            <!-- Individual Partitions Command -->
+                                            <div class="mb-3">
+                                                <h6 class="text-warning mb-2 small">Flash Individual Partitions:</h6>
+                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small" style="word-break: break-all; white-space: pre-wrap;">
+                                                    <code id="espflash-individual-command" style="word-wrap: break-word;">espflash --chip esp32p4 --baud 460800</code>
+                                                </div>
+                                                <div class="mt-2" id="espflash-partition-args">
+                                                    <!-- ESPFlash partition arguments will be inserted here -->
+                                                </div>
                                             </div>
-                                            <div class="mt-2" id="partition-args">
-                                                <!-- Partition arguments will be inserted here -->
+
+                                            <!-- Complete Image Command -->
+                                            <div class="mb-3">
+                                                <h6 class="text-success mb-2 small">Flash Complete Downloaded Image:</h6>
+                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small" style="word-break: break-all; white-space: pre-wrap;">
+                                                    <code>espflash --chip esp32p4 --baud 460800 esp32-p4-complete-firmware-<timestamp>.bin</code>
+                                                </div>
+                                                <p class="text-muted mt-2 small mb-0">
+                                                    <i class="fas fa-info-circle me-1"></i>
+                                                    espflash automatically detects ESP32-P4 and optimal settings
+                                                </p>
                                             </div>
                                         </div>
 
-                                        <!-- Complete Image Command -->
+                                        <!-- esptool.py Commands -->
                                         <div class="mb-4">
-                                            <h6 class="text-success mb-2">
-                                                <i class="fas fa-download me-1"></i>Flash Complete Downloaded Image
+                                            <h6 class="text-primary mb-3">
+                                                <i class="fab fa-python me-1"></i>Using esptool.py
                                             </h6>
-                                            <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
-                                                <code>python -m esptool --chip esp32p4 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 80m 0x0 esp32-p4-complete-firmware-<timestamp>.bin</code>
+
+                                            <!-- Individual Partitions Command -->
+                                            <div class="mb-3">
+                                                <h6 class="text-primary mb-2 small">Flash Individual Partitions:</h6>
+                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small" style="word-break: break-all; white-space: pre-wrap;">
+                                                    <code id="individual-flash-command">python -m esptool --chip esp32p4 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 80m</code>
+                                                </div>
+                                                <div class="mt-2" id="partition-args">
+                                                    <!-- Partition arguments will be inserted here -->
+                                                </div>
                                             </div>
-                                            <p class="text-muted mt-2 small mb-0">
-                                                <i class="fas fa-info-circle me-1"></i>
-                                                        Replace <code>&lt;timestamp&gt;</code> with the actual timestamp from your downloaded file name
-                                            </p>
+
+                                            <!-- Complete Image Command -->
+                                            <div class="mb-3">
+                                                <h6 class="text-success mb-2 small">Flash Complete Downloaded Image:</h6>
+                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small" style="word-break: break-all; white-space: pre-wrap;">
+                                                    <code>python -m esptool --chip esp32p4 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 80m 0x0 esp32-p4-complete-firmware-<timestamp>.bin</code>
+                                                </div>
+                                                <p class="text-muted mt-2 small mb-0">
+                                                    <i class="fas fa-info-circle me-1"></i>
+                                                    Replace <code>&lt;timestamp&gt;</code> with the actual timestamp from your downloaded file name
+                                                </p>
+                                            </div>
                                         </div>
 
-                                        <!-- Prerequisites -->
+                                        <!-- Installation & Prerequisites -->
+                                        <div class="row">
+                                            <!-- esptool.py Installation -->
+                                            <div class="col-md-6 mb-3">
+                                                <div class="alert alert-primary small mb-0 h-100">
+                                                    <h6 class="alert-heading mb-2">
+                                                        <i class="fab fa-python me-1"></i>esptool.py Setup
+                                                    </h6>
+                                                    <ol class="mb-0 small">
+                                                        <li>Install: <code>pip install esptool</code></li>
+                                                        <li>Put ESP32-P4 in download mode (BOOT + RESET)</li>
+                                                        <li>Identify serial port</li>
+                                                        <li>Run: <code>python -m esptool --port /dev/ttyUSB0 ...</code></li>
+                                                    </ol>
+                                                </div>
+                                            </div>
+
+                                            <!-- espflash Installation -->
+                                            <div class="col-md-6 mb-3">
+                                                <div class="alert alert-warning small mb-0 h-100">
+                                                    <h6 class="alert-heading mb-2">
+                                                        <i class="fas fa-bolt me-1"></i>espflash Setup (Faster)
+                                                    </h6>
+                                                    <ol class="mb-0 small">
+                                                        <li>Install: <code>cargo install espflash</code></li>
+                                                        <li>Or via pip: <code>pip install espflash</code></li>
+                                                        <li>Auto-detects ESP32-P4 chip type</li>
+                                                        <li>Run: <code>espflash --monitor firmware.bin</code></li>
+                                                    </ol>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Common Ports Reference -->
                                         <div class="alert alert-info small mb-0">
                                             <h6 class="alert-heading mb-2">
-                                                <i class="fas fa-exclamation-triangle me-1"></i>Prerequisites
+                                                <i class="fas fa-plug me-1"></i>Common Serial Ports
                                             </h6>
-                                            <ul class="mb-0">
-                                                <li>Install esptool: <code>pip install esptool</code></li>
-                                                <li>Put ESP32-P4 in download mode (hold BOOT button, press RESET)</li>
-                                                <li>Connect device via USB and identify serial port</li>
-                                                <li>Run command with appropriate serial port: <code>python -m esptool --port /dev/ttyUSB0 ...</code></li>
-                                            </ul>
+                                            <div class="row">
+                                                <div class="col-md-6">
+                                                    <strong>Linux:</strong> /dev/ttyUSB0, /dev/ttyACM0<br>
+                                                    <strong>macOS:</strong> /dev/cu.usbserial-XXXX, /dev/cu.usbmodemXXXX
+                                                </div>
+                                                <div class="col-md-6">
+                                                    <strong>Windows:</strong> COM1, COM2, COM3... (check Device Manager)<br>
+                                                    <strong>Tip:</strong> Use <code>espflash list-ports</code> to find devices
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
