@@ -424,11 +424,11 @@ class OTAAssemblyApp {
             const espflashCompleteCommand = `${espflashBaseCommand} ${espflashPartitionArgs.join(' ')}`;
 
             partitionArgsElement.innerHTML = `
-                <div class="command-block bg-dark text-light p-3 rounded font-monospace small" style="word-break: break-all; white-space: pre-wrap;">
+                <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
                     <h6 class="text-warning mb-2">
                         <i class="fab fa-python me-1"></i>Complete esptool.py Command:
                     </h6>
-                    <code style="word-wrap: break-word;">${esptoolCompleteCommand}</code>
+                    <code>${esptoolCompleteCommand}</code>
                 </div>
 
                 <div class="mt-3">
@@ -444,11 +444,11 @@ class OTAAssemblyApp {
             // Update espflash partition arguments
             if (espflashPartitionArgsElement) {
                 espflashPartitionArgsElement.innerHTML = `
-                    <div class="command-block bg-dark text-light p-3 rounded font-monospace small" style="word-break: break-all; white-space: pre-wrap;">
+                    <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
                         <h6 class="text-warning mb-2">
                             <i class="fas fa-bolt me-1"></i>Complete espflash Command:
                         </h6>
-                        <code style="word-wrap: break-word;">${espflashCompleteCommand}</code>
+                        <code>${espflashCompleteCommand}</code>
                     </div>
 
                     <div class="mt-3">
@@ -462,8 +462,10 @@ class OTAAssemblyApp {
                 `;
             }
 
-            // Show the complete image commands
+            // Update the command displays
+            const espflashELFCommand = 'espflash --chip esp32p4 --baud 460800 --flash-size 16mb --flash-freq 80m --monitor';
             document.getElementById('espflash-individual-command').textContent = espflashBaseCommand;
+            document.getElementById('espflash-elf-command').textContent = espflashELFCommand;
             document.getElementById('individual-flash-command').textContent = esptoolBaseCommand;
 
         } else {

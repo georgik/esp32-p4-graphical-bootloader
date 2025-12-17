@@ -134,7 +134,8 @@
             border-radius: 6px;
             white-space: pre-wrap;
             word-break: break-all;
-            overflow-x: hidden;
+            overflow-x: auto;
+            overflow-y: hidden;
         }
 
         .command-block code {
@@ -142,7 +143,12 @@
             word-break: break-all;
             word-wrap: break-word;
             overflow-wrap: break-word;
-            max-width: 100%;
+            display: block;
+            text-align: left;
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            box-sizing: border-box;
         }
 
         /* Prevent table layout issues */
@@ -481,32 +487,86 @@
                                         </h6>
                                         <p class="text-muted mb-4">Use these commands to flash your firmware manually from the command line:</p>
 
+                                        <!-- Workflow Info Alert -->
+                                        <div class="alert alert-info small mb-4">
+                                            <h6 class="alert-heading mb-2">
+                                                <i class="fas fa-info-circle me-1"></i>Workflow Information
+                                            </h6>
+                                            <div class="row">
+                                                <div class="col-md-6">
+                                                    <strong>ESP-IDF Workflow (Recommended):</strong><br>
+                                                    Build with ESP-IDF → generates <code>.elf</code> file<br>
+                                                    Use espflash: <code>espflash app.elf</code><br>
+                                                    Automatically handles bootloader + partition table + app
+                                                </div>
+                                                <div class="col-md-6">
+                                                    <strong>Manual Binary Workflow:</strong><br>
+                                                    Individual <code>.bin</code> files for each partition<br>
+                                                    Use esptool.py for precise control<br>
+                                                    Good for custom bootloaders or recovery
+                                                </div>
+                                            </div>
+                                        </div>
+
                                         <!-- espflash Commands (First - Recommended) -->
                                         <div class="mb-4">
                                             <h6 class="text-warning mb-3">
                                                 <i class="fas fa-bolt me-1"></i>Using espflash (Recommended)
                                             </h6>
 
-                                            <!-- Individual Partitions Command -->
+                                            <!-- ELF Flashing (Primary Method) -->
                                             <div class="mb-3">
-                                                <h6 class="text-warning mb-2 small">Flash Individual Partitions:</h6>
-                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small" style="word-break: break-all; white-space: pre-wrap;">
-                                                    <code id="espflash-individual-command" style="word-wrap: break-word;">espflash --chip esp32p4 --baud 460800</code>
+                                                <h6 class="text-warning mb-2 small">Flash ELF Application (Primary Method):</h6>
+                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
+                                                    <code id="espflash-elf-command">espflash --chip esp32p4 --baud 460800 --flash-size 16mb --flash-freq 80m --monitor</code>
+                                                </div>
+                                                <div class="mt-2">
+                                                    <p class="text-muted small mb-1">
+                                                        <i class="fas fa-info-circle me-1"></i>
+                                                        <strong>Usage:</strong> <code>espflash --chip esp32p4 app.elf</code> (flashes bootloader + partition table + app)
+                                                    </p>
+                                                    <p class="text-muted small mb-0">
+                                                        <strong>Requirements:</strong> ESP-IDF built ELF file (not .bin), espflash handles conversion automatically
+                                                    </p>
+                                                </div>
+                                            </div>
+
+                                            <!-- Individual Binary Flashing (Advanced) -->
+                                            <div class="mb-3">
+                                                <h6 class="text-info mb-2 small">Flash Individual Binary Partitions (Advanced):</h6>
+                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
+                                                    <code id="espflash-individual-command">espflash --chip esp32p4 --baud 460800 --format esp-idf</code>
                                                 </div>
                                                 <div class="mt-2" id="espflash-partition-args">
                                                     <!-- ESPFlash partition arguments will be inserted here -->
                                                 </div>
+                                                <p class="text-muted mt-2 small mb-0">
+                                                    <i class="fas fa-exclamation-triangle me-1"></i>
+                                                    Advanced: Use only when you need specific bootloader/partition table binaries
+                                                </p>
                                             </div>
 
-                                            <!-- Complete Image Command -->
+                                            <!-- Monitor Only -->
                                             <div class="mb-3">
-                                                <h6 class="text-success mb-2 small">Flash Complete Downloaded Image:</h6>
-                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small" style="word-break: break-all; white-space: pre-wrap;">
-                                                    <code>espflash --chip esp32p4 --baud 460800 esp32-p4-complete-firmware-<timestamp>.bin</code>
+                                                <h6 class="text-success mb-2 small">Serial Monitor Only:</h6>
+                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
+                                                    <code>espflash --chip esp32p4 --monitor</code>
                                                 </div>
                                                 <p class="text-muted mt-2 small mb-0">
-                                                    <i class="fas fa-info-circle me-1"></i>
-                                                    espflash automatically detects ESP32-P4 and optimal settings
+                                                    <i class="fas fa-terminal me-1"></i>
+                                                    Connects to device and opens serial monitor without flashing
+                                                </p>
+                                            </div>
+
+                                            <!-- Complete Downloaded Image -->
+                                            <div class="mb-3">
+                                                <h6 class="text-warning mb-2 small">Flash Downloaded Complete Image:</h6>
+                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
+                                                    <code>espflash --chip esp32p4 --baud 460800 --format esp-idf --partition-table-offset 0x0 esp32-p4-complete-firmware-<timestamp>.bin</code>
+                                                </div>
+                                                <p class="text-muted mt-2 small mb-0">
+                                                    <i class="fas fa-download me-1"></i>
+                                                    For binary images downloaded from this tool. Use --format esp-idf for compatibility.
                                                 </p>
                                             </div>
                                         </div>
@@ -520,7 +580,7 @@
                                             <!-- Individual Partitions Command -->
                                             <div class="mb-3">
                                                 <h6 class="text-primary mb-2 small">Flash Individual Partitions:</h6>
-                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small" style="word-break: break-all; white-space: pre-wrap;">
+                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
                                                     <code id="individual-flash-command">python -m esptool --chip esp32p4 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 80m</code>
                                                 </div>
                                                 <div class="mt-2" id="partition-args">
@@ -531,20 +591,73 @@
                                             <!-- Complete Image Command -->
                                             <div class="mb-3">
                                                 <h6 class="text-success mb-2 small">Flash Complete Downloaded Image:</h6>
-                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small" style="word-break: break-all; white-space: pre-wrap;">
+                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
                                                     <code>python -m esptool --chip esp32p4 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 80m 0x0 esp32-p4-complete-firmware-<timestamp>.bin</code>
                                                 </div>
+                                                <div class="mt-2">
+                                                    <p class="text-muted small mb-1">
+                                                        <i class="fas fa-info-circle me-1"></i>
+                                                        <strong>Example:</strong> <code>python -m esptool --chip esp32p4 -b 460800 --before default_reset --after hard_reset write_flash --flash_mode dio --flash_size detect --flash_freq 80m 0x0 ~/Downloads/esp32-p4-complete-firmware-1765963895195.bin</code>
+                                                    </p>
+                                                    <p class="text-muted small mb-0">
+                                                        <i class="fas fa-lightbulb me-1"></i>
+                                                        <strong>Pattern:</strong> <code>0x0 &lt;path/to/filename.bin&gt;</code> (address + filename, not just filename)
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Wokwi Commands -->
+                                        <div class="mb-4">
+                                            <h6 class="text-info mb-3">
+                                                <i class="fas fa-desktop me-1"></i>Wokwi CLI (Simulation Validation)
+                                            </h6>
+
+                                            <!-- Basic Validation Command -->
+                                            <div class="mb-3">
+                                                <h6 class="text-info mb-2 small">Validate ESP-IDF Build:</h6>
+                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
+                                                    <code>wokwi-cli --elf build/esp32_p4_graphical_bootloader.elf</code>
+                                                </div>
                                                 <p class="text-muted mt-2 small mb-0">
-                                                    <i class="fas fa-info-circle me-1"></i>
-                                                    Replace <code>&lt;timestamp&gt;</code> with the actual timestamp from your downloaded file name
+                                                    <i class="fas fa-check-circle me-1"></i>
+                                                    Test your firmware in web simulator before hardware flashing
                                                 </p>
+                                            </div>
+
+                                            <!-- Advanced Validation Command -->
+                                            <div class="mb-3">
+                                                <h6 class="text-info mb-2 small">Advanced Validation:</h6>
+                                                <div class="command-block bg-dark text-light p-3 rounded font-monospace small">
+                                                    <code># Test with custom diagram
+wokwi-cli --elf build/app.elf --diagram diagram.json
+
+# Use specific Wokwi version
+wokwi-cli --elf build/app.elf --version latest</code>
+                                                </div>
+                                                <p class="text-muted mt-2 small mb-0">
+                                                    <i class="fas fa-cogs me-1"></i>
+                                                    Advanced options for custom test scenarios and version control
+                                                </p>
+                                            </div>
+
+                                            <div class="alert alert-info small mb-0">
+                                                <h6 class="alert-heading mb-2">
+                                                    <i class="fas fa-lightbulb me-1"></i>Wokwi Validation Workflow
+                                                </h6>
+                                                <ol class="mb-0 small">
+                                                    <li>Build your firmware with ESP-IDF: <code>idf.py build</code></li>
+                                                    <li>Validate in simulator: <code>wokwi-cli --elf build/app.elf</code></li>
+                                                    <li>Fix any issues found in simulation</li>
+                                                    <li>Then flash to hardware: <code>espflash app.elf</code></li>
+                                                </ol>
                                             </div>
                                         </div>
 
                                         <!-- Installation & Prerequisites -->
                                         <div class="row">
                                             <!-- esptool.py Installation -->
-                                            <div class="col-md-6 mb-3">
+                                            <div class="col-md-4 mb-3">
                                                 <div class="alert alert-primary small mb-0 h-100">
                                                     <h6 class="alert-heading mb-2">
                                                         <i class="fab fa-python me-1"></i>esptool.py Setup
@@ -559,17 +672,44 @@
                                             </div>
 
                                             <!-- espflash Installation -->
-                                            <div class="col-md-6 mb-3">
+                                            <div class="col-md-4 mb-3">
                                                 <div class="alert alert-warning small mb-0 h-100">
                                                     <h6 class="alert-heading mb-2">
-                                                        <i class="fas fa-bolt me-1"></i>espflash Setup (Faster)
+                                                        <i class="fas fa-bolt me-1"></i>espflash Setup (Recommended)
                                                     </h6>
                                                     <ol class="mb-0 small">
                                                         <li>Install: <code>cargo install espflash</code></li>
                                                         <li>Or via pip: <code>pip install espflash</code></li>
-                                                        <li>Auto-detects ESP32-P4 chip type</li>
-                                                        <li>Run: <code>espflash --monitor firmware.bin</code></li>
+                                                        <li>Auto-detects ESP32-P4 and optimal settings</li>
+                                                        <li>Usage: <code>espflash app.elf</code> (flashes complete firmware)</li>
+                                                        <li>Monitor: <code>espflash --monitor</code> (serial monitor only)</li>
                                                     </ol>
+                                                    <div class="mt-2 pt-2 border-top">
+                                                        <small class="text-muted">
+                                                            <strong>Note:</strong> espflash works with ELF files from ESP-IDF builds (.elf), not .bin files
+                                                        </small>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <!-- Wokwi CLI Installation -->
+                                            <div class="col-md-4 mb-3">
+                                                <div class="alert alert-info small mb-0 h-100">
+                                                    <h6 class="alert-heading mb-2">
+                                                        <i class="fas fa-desktop me-1"></i>Wokwi CLI Setup (Validation)
+                                                    </h6>
+                                                    <ol class="mb-0 small">
+                                                        <li>Install: <code>pip install wokwi-cli</code></li>
+                                                        <li>Test firmware in web simulator</li>
+                                                        <li>Usage: <code>wokwi-cli --elf build/app.elf</code></li>
+                                                        <li>Validates before hardware flashing</li>
+                                                        <li>Support: ESP32, ESP32-S2, ESP32-S3, ESP32-C3</li>
+                                                    </ol>
+                                                    <div class="mt-2 pt-2 border-top">
+                                                        <small class="text-muted">
+                                                            <strong>Note:</strong> Always validate with Wokwi before flashing to hardware!
+                                                        </small>
+                                                    </div>
                                                 </div>
                                             </div>
                                         </div>
@@ -587,6 +727,25 @@
                                                 <div class="col-md-6">
                                                     <strong>Windows:</strong> COM1, COM2, COM3... (check Device Manager)<br>
                                                     <strong>Tip:</strong> Use <code>espflash list-ports</code> to find devices
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Common Issues -->
+                                        <div class="alert alert-warning small mt-3 mb-0">
+                                            <h6 class="alert-heading mb-2">
+                                                <i class="fas fa-exclamation-triangle me-1"></i>Common Issues & Solutions
+                                            </h6>
+                                            <div class="row">
+                                                <div class="col-md-6">
+                                                    <strong>❌ Wrong:</strong> <code>esptool ... filename.bin</code><br>
+                                                    <strong>✅ Right:</strong> <code>esptool ... 0x0 filename.bin</code><br>
+                                                    <small class="text-muted">esptool requires address + filename pairs</small>
+                                                </div>
+                                                <div class="col-md-6">
+                                                    <strong>❌ Wrong:</strong> <code>espflash filename.bin</code><br>
+                                                    <strong>✅ Right:</strong> <code>espflash app.elf</code><br>
+                                                    <small class="text-muted">espflash prefers ELF files from ESP-IDF builds</small>
                                                 </div>
                                             </div>
                                         </div>
