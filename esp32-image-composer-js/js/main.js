@@ -1975,6 +1975,19 @@ class OTAAssemblyApp {
             }
         });
 
+        // ALWAYS include factory application if it has a file (even if not marked as selected)
+        if (this.basePartitions.factory && this.basePartitions.factory.file) {
+            partitions.unshift({
+                name: this.partitionTableGenerator.getESPIDFPartitionName('factory'),
+                type: this.partitionTableGenerator.getPartitionType('factory'),
+                subtype: this.partitionTableGenerator.getPartitionSubtype('factory'),
+                offset: this.basePartitions.factory.offset,
+                size: this.partitionTableGenerator.alignPartitionSize(this.basePartitions.factory.file.size, 'factory'),
+                flags: this.partitionTableGenerator.getPartitionFlags('factory')
+            });
+            console.log('Added factory app to partition table');
+        }
+
         // Add selected OTA partitions
         this.otaPartitions.forEach(ota => {
             if (ota.selected) {

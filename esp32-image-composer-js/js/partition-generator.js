@@ -96,71 +96,65 @@ class PartitionTableGenerator {
     }
 
     /**
-     * Generate binary partition table data
+     * Generate binary partition table data using ESP-IDF format
      * @param {Array} partitions - Array of partitions
      * @returns {ArrayBuffer} Binary partition table
      */
     generateBinary(partitions) {
         const entrySize = 32; // Each partition entry is 32 bytes
         const maxEntries = 95; // Maximum entries per ESP-IDF specification
-        const tableSize = 32 + (maxEntries * entrySize); // Header + entries
+        const tableSize = maxEntries * entrySize; // No header - direct entries
 
         const buffer = new ArrayBuffer(tableSize);
         const view = new DataView(buffer);
 
-        // Write header (32 bytes) - magic number 0xAA50 in little-endian (0x50, 0xAA)
-        view.setUint8(0, 0x50);  // Little-endian low byte
-        view.setUint8(1, 0xAA);  // Little-endian high byte
-        view.setUint8(2, this.version & 0xFF);
-        view.setUint8(3, (this.version >> 8) & 0xFF);
-
-        // Write MD5 placeholder (16 bytes)
-        for (let i = 0; i < 16; i++) {
-            view.setUint8(4 + i, 0);
+        // Fill with 0xFF (empty marker) initially
+        for (let i = 0; i < tableSize; i++) {
+            view.setUint8(i, 0xFF);
         }
 
-        // Write partition entries
-        let offset = 32;
+        // Write partition entries directly (no header) following ESP-IDF format:
+        // struct {
+        //   uint16_t magic;    // bytes 0-1  (0xAA50 little-endian)
+        //   uint8_t  type;     // byte  2
+        //   uint8_t  subtype;  // byte  3
+        //   uint32_t offset;   // bytes 4-7
+        //   uint32_t size;     // bytes 8-11
+        //   uint8_t  name[16]; // bytes 12-27
+        //   uint32_t flags;    // bytes 28-31
+        // } __attribute__((packed));
+
         partitions.forEach((partition, index) => {
             if (index >= maxEntries) return;
 
-            // Name (16 bytes, null-terminated)
-            const nameBytes = new TextEncoder().encode(partition.name);
-            for (let i = 0; i < 16; i++) {
-                view.setUint8(offset + i, i < nameBytes.length ? nameBytes[i] : 0);
-            }
-            offset += 16;
+            const entryOffset = index * entrySize;
+
+            // Magic number (2 bytes) - Match ESP-IDF format: AA 50 bytes
+            view.setUint8(entryOffset + 0, 0xAA);  // High byte first
+            view.setUint8(entryOffset + 1, 0x50);  // Low byte second
 
             // Type (1 byte)
-            view.setUint8(offset, this.getPartitionTypeValue(partition.type));
-            offset += 1;
+            view.setUint8(entryOffset + 2, this.getPartitionTypeValue(partition.type));
 
             // Subtype (1 byte)
-            view.setUint8(offset, this.getPartitionSubtypeValue(partition.subtype));
-            offset += 1;
+            view.setUint8(entryOffset + 3, this.getPartitionSubtypeValue(partition.subtype));
 
-            // Flags (2 bytes, unused - set to 0)
-            view.setUint16(offset, 0, true); // Little-endian
-            offset += 2;
+            // Offset (4 bytes) - little-endian
+            view.setUint32(entryOffset + 4, partition.offset, true);
 
-            // Offset (4 bytes)
-            view.setUint32(offset, partition.offset, true); // Little-endian
-            offset += 4;
+            // Size (4 bytes) - little-endian
+            view.setUint32(entryOffset + 8, partition.size, true);
 
-            // Size (4 bytes)
-            view.setUint32(offset, partition.size, true); // Little-endian
-            offset += 4;
-
-            // Flags (4 bytes)
-            view.setUint32(offset, this.parseFlags(partition.flags), true);
-            offset += 4;
-
-            // Should be exactly at start of next entry (32 bytes total)
-            const expectedOffset = 32 + (index * 32);
-            if (offset !== expectedOffset) {
-                console.warn(`Partition entry alignment error: current offset ${offset}, expected ${expectedOffset}`);
-                offset = expectedOffset; // Force correct alignment
+            // Name (16 bytes) - null-padded ASCII
+            const nameBytes = new TextEncoder().encode(partition.name);
+            for (let i = 0; i < 16; i++) {
+                view.setUint8(entryOffset + 12 + i, i < nameBytes.length ? nameBytes[i] : 0);
             }
+
+            // Flags (4 bytes) - little-endian
+            view.setUint32(entryOffset + 28, this.parseFlags(partition.flags), true);
+
+            console.log(`Partition entry ${index}: ${partition.name} at 0x${partition.offset.toString(16)} size 0x${partition.size.toString(16)}`);
         });
 
         return buffer;
