@@ -1360,12 +1360,24 @@ class OTAAssemblyApp {
 
         // Add selected base partitions
         Object.entries(this.basePartitions).forEach(([key, partition]) => {
-            if (partition.selected && partition.file) {
+            // Always include partition table if selected (even without file - will generate one)
+            if (key === 'partition_table' && partition.selected) {
                 selectedPartitions.push({
                     name: partition.name,
                     offset: partition.offset,
                     file: partition.file,
-                    type: key === 'bootloader' ? 'bootloader' : 'app'
+                    type: 'partition_table',
+                    key: key
+                });
+            }
+            // Include other partitions only if they have files
+            else if (partition.selected && partition.file) {
+                selectedPartitions.push({
+                    name: partition.name,
+                    offset: partition.offset,
+                    file: partition.file,
+                    type: key === 'bootloader' ? 'bootloader' : 'app',
+                    key: key
                 });
             }
         });
@@ -1810,17 +1822,30 @@ class OTAAssemblyApp {
 
             // Copy each partition into the correct location using pre-calculated offsets
             for (const partition of partitionsWithOffsets) {
-                // Skip partitions without files
-                if (!partition.file) {
-                    console.warn(`Skipping ${partition.name}: missing file`);
-                    continue;
-                }
-
                 try {
-                    const fileData = new Uint8Array(await partition.file.arrayBuffer());
+                    let fileData;
                     const offset = partition.calculatedOffset;
 
-                    console.log(`Adding ${partition.name} at offset 0x${offset.toString(16).padStart(8, '0')} (${fileData.length} bytes)`);
+                    // Handle partition table specially
+                    if (partition.type === 'partition_table') {
+                        if (partition.file) {
+                            // Use custom partition table file
+                            fileData = new Uint8Array(await partition.file.arrayBuffer());
+                            console.log(`Adding custom ${partition.name} at offset 0x${offset.toString(16).padStart(8, '0')} (${fileData.length} bytes)`);
+                        } else {
+                            // Generate partition table from selections
+                            console.log(`Generating ${partition.name} at offset 0x${offset.toString(16).padStart(8, '0')} from selections`);
+                            const partitionTable = this.generatePartitionTableFromSelections();
+                            fileData = new Uint8Array(this.partitionTableGenerator.generateBinary(partitionTable.entries));
+                        }
+                    } else if (partition.file) {
+                        // Use provided file for other partitions
+                        fileData = new Uint8Array(await partition.file.arrayBuffer());
+                        console.log(`Adding ${partition.name} at offset 0x${offset.toString(16).padStart(8, '0')} (${fileData.length} bytes)`);
+                    } else {
+                        console.warn(`Skipping ${partition.name}: missing file`);
+                        continue;
+                    }
 
                     if (offset + fileData.length > completeImage.length) {
                         console.warn(`Partition ${partition.name} extends beyond image size, truncating`);
@@ -1832,7 +1857,7 @@ class OTAAssemblyApp {
                         completeImage.set(fileData, offset);
                     }
 
-                    console.log(`Added ${partition.name} at offset 0x${offset.toString(16).padStart(8, '0')} (${fileData.length} bytes)`);
+                    console.log(`Successfully added ${partition.name} at offset 0x${offset.toString(16).padStart(8, '0')} (${fileData.length} bytes)`);
                 } catch (error) {
                     console.error(`Failed to process ${partition.name}:`, error);
                     this.showError(`Failed to process ${partition.name}: ${error.message}`);
@@ -1911,7 +1936,7 @@ class OTAAssemblyApp {
                 }
 
                 // Convert to binary format
-                const binaryData = this.partitionTableGenerator.generatePartitionTableBinary(partitionTable);
+                const binaryData = this.partitionTableGenerator.generateBinary(partitionTable.entries);
 
                 const blob = new Blob([binaryData], { type: 'application/octet-stream' });
                 const url = URL.createObjectURL(blob);
@@ -1935,9 +1960,9 @@ class OTAAssemblyApp {
     generatePartitionTableFromSelections() {
         const partitions = [];
 
-        // Add selected base partitions (excluding bootloader itself)
+        // Add selected base partitions (excluding bootloader and partition_table itself)
         Object.entries(this.basePartitions).forEach(([key, config]) => {
-            if (config.selected && key !== 'bootloader') {
+            if (config.selected && key !== 'bootloader' && key !== 'partition_table') {
                 const hasFile = !!config.file;
                 partitions.push({
                     name: this.partitionTableGenerator.getESPIDFPartitionName(key),
@@ -1957,13 +1982,21 @@ class OTAAssemblyApp {
                 partitions.push({
                     name: ota.name,
                     type: 'app',
-                    subtype: ota.name.replace('ota_', 'ota_'),
+                    subtype: ota.name,  // Use full name like 'ota_0', not just 'ota_'
                     offset: ota.offset,
                     size: hasFile ? this.partitionTableGenerator.alignPartitionSize(ota.file.size, 'ota') : this.partitionTableGenerator.getDefaultPartitionSize('ota'),
                     flags: '0x0'
                 });
             }
         });
+
+        console.log('Generated partition entries:', partitions.map(p => ({
+            name: p.name,
+            type: p.type,
+            subtype: p.subtype,
+            offset: `0x${p.offset.toString(16)}`,
+            size: `0x${p.size.toString(16)}`
+        })));
 
         return {
             entries: partitions,

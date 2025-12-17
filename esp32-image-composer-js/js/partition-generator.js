@@ -108,9 +108,9 @@ class PartitionTableGenerator {
         const buffer = new ArrayBuffer(tableSize);
         const view = new DataView(buffer);
 
-        // Write header (32 bytes)
-        view.setUint8(0, this.magicNumber & 0xFF);
-        view.setUint8(1, (this.magicNumber >> 8) & 0xFF);
+        // Write header (32 bytes) - magic number 0xAA50 in little-endian (0x50, 0xAA)
+        view.setUint8(0, 0x50);  // Little-endian low byte
+        view.setUint8(1, 0xAA);  // Little-endian high byte
         view.setUint8(2, this.version & 0xFF);
         view.setUint8(3, (this.version >> 8) & 0xFF);
 
@@ -139,6 +139,10 @@ class PartitionTableGenerator {
             view.setUint8(offset, this.getPartitionSubtypeValue(partition.subtype));
             offset += 1;
 
+            // Flags (2 bytes, unused - set to 0)
+            view.setUint16(offset, 0, true); // Little-endian
+            offset += 2;
+
             // Offset (4 bytes)
             view.setUint32(offset, partition.offset, true); // Little-endian
             offset += 4;
@@ -149,7 +153,14 @@ class PartitionTableGenerator {
 
             // Flags (4 bytes)
             view.setUint32(offset, this.parseFlags(partition.flags), true);
-            offset += 6; // Skip to next entry (32 bytes total)
+            offset += 4;
+
+            // Should be exactly at start of next entry (32 bytes total)
+            const expectedOffset = 32 + (index * 32);
+            if (offset !== expectedOffset) {
+                console.warn(`Partition entry alignment error: current offset ${offset}, expected ${expectedOffset}`);
+                offset = expectedOffset; // Force correct alignment
+            }
         });
 
         return buffer;
