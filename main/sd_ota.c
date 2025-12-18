@@ -23,26 +23,44 @@ static bool g_sd_card_mounted = false;
 static sdmmc_card_t* g_sd_card = NULL;
 
 esp_err_t sd_ota_init(void) {
-    ESP_LOGI(TAG, "Initializing SD card for OTA operations using BSP...");
+    ESP_LOGI(TAG, "Initializing SD card for OTA operations using improved BSP method...");
 
     if (g_sd_card_mounted) {
         ESP_LOGW(TAG, "SD card already mounted");
         return ESP_OK;
     }
 
-    // Use BSP to mount SD card with board-specific configuration
+    ESP_LOGI(TAG, "Using standard BSP SD card mount (handles LDO internally)...");
+
+    // Use standard BSP mount - let it handle LDO configuration internally
     esp_err_t ret = bsp_sdcard_mount();
 
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "BSP SD card mount failed (%s)", esp_err_to_name(ret));
         if (ret == ESP_FAIL) {
-            ESP_LOGE(TAG, "Failed to mount filesystem via BSP");
+            ESP_LOGE(TAG, "Failed to mount filesystem - Check SD card format (should be FAT32)");
+            ESP_LOGE(TAG, "SD card partition type check needed:");
+            ESP_LOGE(TAG, "- Format: FAT32 (not exFAT, not NTFS, not ext4)");
+            ESP_LOGE(TAG, "- Partition: MBR (not GPT)");
+            ESP_LOGE(TAG, "- Cluster size: 4KB-32KB recommended");
         } else if (ret == ESP_ERR_NO_MEM) {
-            ESP_LOGE(TAG, "Memory error during BSP SD mount");
+            ESP_LOGE(TAG, "Memory error");
         } else if (ret == ESP_ERR_TIMEOUT) {
-            ESP_LOGE(TAG, "SD card timeout - please check if SD card is properly inserted");
+            ESP_LOGE(TAG, "SD card timeout - Check SD card insertion and compatibility");
         } else {
-            ESP_LOGE(TAG, "BSP SD card initialization failed (%s)", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "SD card initialization failed (%s)", esp_err_to_name(ret));
         }
+        ESP_LOGE(TAG, "Troubleshooting tips:");
+        ESP_LOGE(TAG, "1. Ensure SD card is properly inserted");
+        ESP_LOGE(TAG, "2. Check SD card format:");
+        ESP_LOGE(TAG, "   - Must be FAT32 (not exFAT)");
+        ESP_LOGE(TAG, "   - Use MBR partition table (not GPT)");
+        ESP_LOGE(TAG, "   - Check cluster size (4KB-32KB works well)");
+        ESP_LOGE(TAG, "3. Try a different SD card");
+        ESP_LOGE(TAG, "4. Check if SD card is compatible with ESP32-P4");
+        ESP_LOGE(TAG, "5. Try reformatting with standard FAT32 settings");
+        ESP_LOGE(TAG, "6. Verify SD card voltage (should be 3.3V compatible)");
+
         return ret;
     }
 
@@ -305,7 +323,9 @@ sd_ota_state_t sd_ota_get_state(void) {
 
 void sd_ota_cleanup(void) {
     if (g_sd_card_mounted) {
+        // Use BSP unmount function
         esp_err_t ret = bsp_sdcard_unmount();
+
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Failed to unmount SD card via BSP: %s", esp_err_to_name(ret));
         } else {

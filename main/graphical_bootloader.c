@@ -105,10 +105,43 @@ typedef enum {
     BOOT_STATE_ERROR
 } boot_state_t;
 
+// Inter-task communication structure
+typedef struct {
+    boot_state_t state;
+    char app_name[64];
+    char error_message[256];
+    int animation_frame;
+    bool ota_in_progress;
+    bool ota_success;
+    float ota_progress;  // 0.0 to 1.0
+} display_state_t;
+
+// SD card operation command structure
+typedef struct {
+    char filename[64];
+    esp_partition_subtype_t partition_subtype;
+    bool operation_pending;
+    bool operation_complete;
+    bool operation_success;
+} sd_ota_command_t;
+
 static boot_state_t current_boot_state = BOOT_STATE_SELECTING;
 static const char* booting_app_name = NULL;
 static int booting_animation_time = 0;
 static int selected_tile_index = -1;
+
+// Dual-core task communication
+static display_state_t g_display_state = {0};
+static sd_ota_command_t g_sd_ota_command = {0};
+static TaskHandle_t g_display_task_handle = NULL;
+static TaskHandle_t g_sd_card_task_handle = NULL;
+
+// Synchronization and monitoring
+static SemaphoreHandle_t g_display_mutex = NULL;
+static SemaphoreHandle_t g_sd_command_mutex = NULL;
+
+// Display heartbeat counters for monitoring
+static uint32_t g_display_heartbeat = 0;
 
 // Configuration management globals
 static bootloader_config_t g_config;
@@ -138,55 +171,176 @@ static const char* get_app_label_by_index(int app_index) {
     return "Unknown";
 }
 
-// Load OTA from SD card and boot to it
-static bool load_and_boot_from_sd_card(const char* filename, esp_partition_subtype_t partition_subtype) {
-    ESP_LOGI(TAG, "Starting SD card OTA process for %s...", filename);
+// SD card task - runs on Core 0
+static void sd_card_task(void *pvParameters) {
+    int sd_core = xPortGetCoreID();
+    ESP_LOGI(TAG, "SD card task started on Core %d (should be Core 0)", sd_core);
 
-    // Set loading state for visual feedback
-    current_boot_state = BOOT_STATE_SD_OTA_LOADING;
-    booting_app_name = "Loading from SD Card";
-    booting_animation_time = 0;
-
-    // Initialize SD card
-    esp_err_t ret = sd_ota_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize SD card: %s", esp_err_to_name(ret));
-        current_boot_state = BOOT_STATE_ERROR;
-        return false;
+    // Verify we're on the correct core
+    if (sd_core != 0) {
+        ESP_LOGW(TAG, "WARNING: SD card task is on Core %d instead of Core 0!", sd_core);
     }
 
-    // Check if file exists on SD card
-    ret = sd_ota_check_file(filename);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "OTA file not found on SD card: %s (%s)", filename, esp_err_to_name(ret));
-        current_boot_state = BOOT_STATE_ERROR;
-        sd_ota_cleanup();
-        return false;
+    // Note: Core affinity is already set via xTaskCreatePinnedToCore in app_main
+    ESP_LOGI(TAG, "SD card task core affinity set via task creation");
+
+    while (1) {
+        // Check if there's a pending SD card operation
+        if (xSemaphoreTake(g_sd_command_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            if (g_sd_ota_command.operation_pending && !g_sd_ota_command.operation_complete) {
+                ESP_LOGI(TAG, "Starting SD card OTA process for %s...", g_sd_ota_command.filename);
+
+                // Update display state
+                if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                    g_display_state.state = BOOT_STATE_SD_OTA_LOADING;
+                    strcpy(g_display_state.app_name, "Loading from SD Card");
+                    g_display_state.ota_in_progress = true;
+                    g_display_state.ota_success = false;
+                    g_display_state.ota_progress = 0.0f;
+                    g_display_state.animation_frame = 0;
+                    xSemaphoreGive(g_display_mutex);
+                }
+
+                // Initialize SD card with yield to prevent blocking
+                esp_err_t ret = sd_ota_init();
+                if (ret != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to initialize SD card: %s", esp_err_to_name(ret));
+                    g_sd_ota_command.operation_complete = true;
+                    g_sd_ota_command.operation_success = false;
+
+                    // Update display error state
+                    if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                        g_display_state.state = BOOT_STATE_ERROR;
+                        strcpy(g_display_state.error_message, "SD card initialization failed");
+                        g_display_state.ota_in_progress = false;
+                        g_display_state.ota_success = false;
+                        xSemaphoreGive(g_display_mutex);
+                    }
+                } else {
+                    // Update progress - 20%
+                    if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                        g_display_state.ota_progress = 0.2f;
+                        xSemaphoreGive(g_display_mutex);
+                    }
+
+                    // Check if file exists on SD card
+                    ret = sd_ota_check_file(g_sd_ota_command.filename);
+                    if (ret != ESP_OK) {
+                        ESP_LOGE(TAG, "OTA file not found on SD card: %s (%s)",
+                                g_sd_ota_command.filename, esp_err_to_name(ret));
+                        g_sd_ota_command.operation_complete = true;
+                        g_sd_ota_command.operation_success = false;
+                        sd_ota_cleanup();
+
+                        // Update display error state
+                        if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                            g_display_state.state = BOOT_STATE_ERROR;
+                            snprintf(g_display_state.error_message, sizeof(g_display_state.error_message),
+                                    "File not found: %s", g_sd_ota_command.filename);
+                            g_display_state.ota_in_progress = false;
+                            g_display_state.ota_success = false;
+                            xSemaphoreGive(g_display_mutex);
+                        }
+                    } else {
+                        // Update progress - 40%
+                        if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                            g_display_state.ota_progress = 0.4f;
+                            xSemaphoreGive(g_display_mutex);
+                        }
+
+                        // IMPORTANT: Yield CPU periodically during flash operation
+                        // This prevents complete CPU saturation during long I/O operations
+                        vTaskDelay(pdMS_TO_TICKS(5));
+
+                        // Flash file to partition
+                        ret = sd_ota_flash_file(g_sd_ota_command.filename, g_sd_ota_command.partition_subtype);
+                        if (ret != ESP_OK) {
+                            ESP_LOGE(TAG, "Failed to flash OTA from SD card: %s", esp_err_to_name(ret));
+                            g_sd_ota_command.operation_complete = true;
+                            g_sd_ota_command.operation_success = false;
+                            sd_ota_cleanup();
+
+                            // Update display error state
+                            if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                                g_display_state.state = BOOT_STATE_ERROR;
+                                strcpy(g_display_state.error_message, "OTA flash failed");
+                                g_display_state.ota_in_progress = false;
+                                g_display_state.ota_success = false;
+                                xSemaphoreGive(g_display_mutex);
+                            }
+                        } else {
+                            ESP_LOGI(TAG, "SD card OTA completed successfully!");
+                            sd_ota_cleanup();
+
+                            // Update progress - 90%
+                            if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                                g_display_state.ota_progress = 0.9f;
+                                xSemaphoreGive(g_display_mutex);
+                            }
+
+                            // Set success state
+                            g_sd_ota_command.operation_complete = true;
+                            g_sd_ota_command.operation_success = true;
+
+                            if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                                g_display_state.state = BOOT_STATE_BOOTING;
+                                strcpy(g_display_state.app_name, "SD Card Application");
+                                g_display_state.ota_progress = 1.0f;
+                                g_display_state.ota_success = true;
+                                xSemaphoreGive(g_display_mutex);
+                            }
+
+                            // Add delay to show success animation
+                            vTaskDelay(pdMS_TO_TICKS(2000));
+
+                            ESP_LOGI(TAG, "Restarting to boot from newly flashed OTA partition...");
+                            esp_restart();
+                        }
+                    }
+                }
+            }
+            xSemaphoreGive(g_sd_command_mutex);
+        }
+
+        // Small delay to prevent busy waiting
+        vTaskDelay(pdMS_TO_TICKS(20));
+
+        // Monitor task health every 5 seconds
+        static uint32_t last_stats = 0;
+        uint32_t current_time = xTaskGetTickCount();
+        if (current_time - last_stats > pdMS_TO_TICKS(5000)) {
+            ESP_LOGI(TAG, "SD task stats - Core: %d, Stack: %lu bytes free",
+                     xPortGetCoreID(), uxTaskGetStackHighWaterMark(NULL));
+            last_stats = current_time;
+        }
+    }
+}
+
+// Request SD card OTA operation (called from main/display thread)
+static bool request_sd_ota_operation(const char* filename, esp_partition_subtype_t partition_subtype) {
+    if (xSemaphoreTake(g_sd_command_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        // Check if an operation is already pending
+        if (g_sd_ota_command.operation_pending && !g_sd_ota_command.operation_complete) {
+            ESP_LOGW(TAG, "SD card operation already in progress");
+            xSemaphoreGive(g_sd_command_mutex);
+            return false;
+        }
+
+        // Set up the command
+        strncpy(g_sd_ota_command.filename, filename, sizeof(g_sd_ota_command.filename) - 1);
+        g_sd_ota_command.filename[sizeof(g_sd_ota_command.filename) - 1] = '\0';
+        g_sd_ota_command.partition_subtype = partition_subtype;
+        g_sd_ota_command.operation_pending = true;
+        g_sd_ota_command.operation_complete = false;
+        g_sd_ota_command.operation_success = false;
+
+        ESP_LOGI(TAG, "SD card OTA operation requested: %s", filename);
+        xSemaphoreGive(g_sd_command_mutex);
+        return true;
     }
 
-    // Flash file to partition
-    ret = sd_ota_flash_file(filename, partition_subtype);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to flash OTA from SD card: %s", esp_err_to_name(ret));
-        current_boot_state = BOOT_STATE_ERROR;
-        sd_ota_cleanup();
-        return false;
-    }
-
-    ESP_LOGI(TAG, "SD card OTA completed successfully!");
-    sd_ota_cleanup();
-
-    // Set booting state for final visual feedback
-    current_boot_state = BOOT_STATE_BOOTING;
-    booting_app_name = "SD Card Application";
-
-    // Add delay to show success animation
-    vTaskDelay(pdMS_TO_TICKS(2000));
-
-    ESP_LOGI(TAG, "Restarting to boot from newly flashed OTA partition...");
-    esp_restart();
-
-    return true;
+    ESP_LOGE(TAG, "Failed to acquire SD command mutex");
+    return false;
 }
 
 // Boot switching function using RTC register for bootloader communication
@@ -217,13 +371,13 @@ static void ota_switch_to_app(int app_index) {
     // Handle Demo 1 (app_index == 0) - Load from SD card and flash to OTA_1
     if (app_index == 0) {
         ESP_LOGI(TAG, "Demo 1 selected - loading ota1.bin from SD card to OTA_1 partition");
-        bool success = load_and_boot_from_sd_card("ota1.bin", ESP_PARTITION_SUBTYPE_APP_OTA_1);
+        bool success = request_sd_ota_operation("ota1.bin", ESP_PARTITION_SUBTYPE_APP_OTA_1);
         if (!success) {
-            ESP_LOGE(TAG, "Failed to load OTA from SD card");
+            ESP_LOGE(TAG, "Failed to request SD OTA operation");
             current_boot_state = BOOT_STATE_ERROR;
             return;
         }
-        return; // Function will not return as it restarts
+        return; // Operation is now asynchronous
     }
 
     // Map app_index to partition type for bootloader
@@ -328,8 +482,15 @@ static void draw_booting_screen(int screenWidth, int screenHeight, int frameCoun
     DrawText(cornerMsg, 5, screenHeight - 20, cornerFontSize, GRAY);
 }
 
-// Draw SD OTA loading screen with progress
+// Draw SD OTA loading screen with progress (dual-core version)
 static void draw_sd_ota_loading_screen(int screenWidth, int screenHeight, int frameCounter) {
+    // Get current display state
+    display_state_t state = {0};
+    if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        state = g_display_state;
+        xSemaphoreGive(g_display_mutex);
+    }
+
     // Dark background during SD OTA loading
     Color bgColor = (Color){30, 20, 40, 255}; // Slightly purple tint for SD card
     ClearBackground(bgColor);
@@ -338,7 +499,10 @@ static void draw_sd_ota_loading_screen(int screenWidth, int screenHeight, int fr
     float pulse = sinf(frameCounter * 0.03f) * 0.3f + 0.7f;
 
     // Main loading message
-    const char* mainMessage = "Loading from SD Card...";
+    const char* mainMessage = state.app_name;
+    if (strlen(mainMessage) == 0) {
+        mainMessage = "Loading from SD Card...";
+    }
     int mainFontSize = 28;
     int mainWidth = MeasureText(mainMessage, mainFontSize);
     int mainX = (screenWidth - mainWidth) / 2;
@@ -371,7 +535,7 @@ static void draw_sd_ota_loading_screen(int screenWidth, int screenHeight, int fr
     // SD card corner notch
     DrawRectangle(sdCardX + sdCardWidth - 15, sdCardY + 5, 10, 15, bgColor);
 
-    // Progress bar
+    // Progress bar - use actual progress from SD card task
     int barWidth = 320;
     int barHeight = 12;
     int barX = (screenWidth - barWidth) / 2;
@@ -380,36 +544,58 @@ static void draw_sd_ota_loading_screen(int screenWidth, int screenHeight, int fr
     // Background bar
     DrawRectangle(barX, barY, barWidth, barHeight, (Color){50, 50, 60, 255});
 
-    // Animated progress - simulate loading progress
-    int progress = (frameCounter * 3) % (barWidth + 60);
-    if (progress > barWidth) {
-        progress = barWidth - (progress - barWidth);
-    }
-    DrawRectangle(barX, barY, progress, barHeight, (Color){200, 150, 255, 255});
+    // Progress fill - use actual progress
+    int progress = (int)(state.ota_progress * barWidth);
+    Color progressColor = state.ota_success ? GREEN : (Color){200, 150, 255, 255};
+    DrawRectangle(barX, barY, progress, barHeight, progressColor);
+
+    // Progress percentage
+    char progressText[64];
+    snprintf(progressText, sizeof(progressText), "Progress: %d%%", (int)(state.ota_progress * 100));
+    int progressFontSize = 14;
+    int progressTextWidth = MeasureText(progressText, progressFontSize);
+    int progressTextX = (screenWidth - progressTextWidth) / 2;
+    DrawText(progressText, progressTextX, barY + barHeight + 10, progressFontSize, WHITE);
 
     // Status text
-    const char* statusText = "Flashing ota1.bin to OTA_1 partition...";
+    const char* statusText = "Initializing SD card...";
+    if (state.ota_progress >= 0.2f && state.ota_progress < 0.4f) {
+        statusText = "Checking OTA file...";
+    } else if (state.ota_progress >= 0.4f && state.ota_progress < 0.9f) {
+        statusText = "Flashing firmware...";
+    } else if (state.ota_progress >= 0.9f && !state.ota_success) {
+        statusText = "Finalizing...";
+    } else if (state.ota_success) {
+        statusText = "OTA completed successfully!";
+    } else if (state.ota_in_progress) {
+        statusText = "Processing...";
+    }
+
     int statusFontSize = 16;
     int statusWidth = MeasureText(statusText, statusFontSize);
     int statusX = (screenWidth - statusWidth) / 2;
     int statusY = screenHeight / 2 + 50;
-    DrawText(statusText, statusX, statusY, statusFontSize, (Color){200, 200, 255, 255});
+    Color statusColor = state.ota_success ? GREEN : (Color){200, 200, 255, 255};
+    DrawText(statusText, statusX, statusY, statusFontSize, statusColor);
 
     // Loading dots animation
-    int dotCount = (frameCounter / 25) % 4;
-    int dotStartX = (screenWidth - (dotCount * 20)) / 2;
-    int dotY = screenHeight / 2 + 100;
+    if (!state.ota_success && state.ota_in_progress) {
+        int dotCount = (frameCounter / 25) % 4;
+        int dotStartX = (screenWidth - (dotCount * 20)) / 2;
+        int dotY = screenHeight / 2 + 100;
 
-    for (int i = 0; i < dotCount; i++) {
-        int dotX = dotStartX + i * 20;
-        int dotSize = 6 + (int)(sinf(frameCounter * 0.08f + i) * 2);
-        DrawCircleV((Vector2){dotX, dotY}, dotSize, (Color){200, 150, 255, (unsigned char)(255 * pulse)});
+        for (int i = 0; i < dotCount; i++) {
+            int dotX = dotStartX + i * 20;
+            int dotSize = 6 + (int)(sinf(frameCounter * 0.08f + i) * 2);
+            DrawCircleV((Vector2){dotX, dotY}, dotSize, (Color){200, 150, 255, (unsigned char)(255 * pulse)});
+        }
     }
 
     // Corner message
-    const char* cornerMsg = "Do not remove SD card!";
+    const char* cornerMsg = state.ota_success ? "Successfully completed!" : "Do not remove SD card!";
     int cornerFontSize = 12;
-    DrawText(cornerMsg, 5, screenHeight - 20, cornerFontSize, (Color){255, 200, 200, 255});
+    Color cornerColor = state.ota_success ? GREEN : (Color){255, 200, 200, 255};
+    DrawText(cornerMsg, 5, screenHeight - 20, cornerFontSize, cornerColor);
 }
 
 // Draw error screen with restart button
@@ -783,6 +969,49 @@ void draw_tile(const Tile* tile) {
 
 void raylib_task(void *pvParameter)
 {
+    int display_core = xPortGetCoreID();
+    ESP_LOGI(TAG, "Raylib display task started on Core %d (should be Core 1)", display_core);
+
+    // Verify we're on the correct core
+    if (display_core != 1) {
+        ESP_LOGW(TAG, "WARNING: Display task is on Core %d instead of Core 1!", display_core);
+    }
+
+    // Initialize dual-core communication
+    g_display_mutex = xSemaphoreCreateMutex();
+    g_sd_command_mutex = xSemaphoreCreateMutex();
+
+    if (!g_display_mutex || !g_sd_command_mutex) {
+        ESP_LOGE(TAG, "Failed to create semaphores");
+        return;
+    }
+
+    // Note: Core affinity is already set via xTaskCreatePinnedToCore in app_main
+    ESP_LOGI(TAG, "Display task core affinity set via task creation");
+
+    // Initialize display state
+    if (xSemaphoreTake(g_display_mutex, portMAX_DELAY) == pdTRUE) {
+        g_display_state.state = BOOT_STATE_SELECTING;
+        g_display_state.app_name[0] = '\0';
+        g_display_state.error_message[0] = '\0';
+        g_display_state.animation_frame = 0;
+        g_display_state.ota_in_progress = false;
+        g_display_state.ota_success = false;
+        g_display_state.ota_progress = 0.0f;
+        xSemaphoreGive(g_display_mutex);
+    }
+
+    // Initialize SD command state
+    if (xSemaphoreTake(g_sd_command_mutex, portMAX_DELAY) == pdTRUE) {
+        g_sd_ota_command.operation_pending = false;
+        g_sd_ota_command.operation_complete = true;
+        g_sd_ota_command.operation_success = false;
+        xSemaphoreGive(g_sd_command_mutex);
+    }
+
+    // SD card task is created in app_main on the other core
+    ESP_LOGI(TAG, "SD card task will be created by app_main on the opposite core");
+
     // Query actual display dimensions from port
     uint16_t screenWidth = 320;  // Default fallback
     uint16_t screenHeight = 240;
@@ -859,20 +1088,45 @@ void raylib_task(void *pvParameter)
         // Begin drawing
         BeginDrawing();
 
+        // Get current display state from dual-core system
+        display_state_t current_state = {0};
+
+        // CRITICAL: Always ensure display rendering continues
+        // Use very short mutex timeout to prevent blocking
+        if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+            current_state = g_display_state;
+            xSemaphoreGive(g_display_mutex);
+        } else {
+            // If we can't get mutex, continue with previous state
+            // NEVER block the display rendering loop!
+            ESP_LOGD(TAG, "Display mutex timeout - continuing with previous state");
+        }
+
+        // Update legacy variables for compatibility
+        current_boot_state = current_state.state;
+        booting_app_name = current_state.app_name;
+        if (strlen(current_state.app_name) > 0) {
+            booting_animation_time++;
+        }
+
         // State-based rendering
-        if (current_boot_state == BOOT_STATE_BOOTING) {
+        if (current_state.state == BOOT_STATE_BOOTING) {
             // Draw booting screen with animation
             draw_booting_screen(screenWidth, screenHeight, booting_animation_time);
-            booting_animation_time++;
-        } else if (current_boot_state == BOOT_STATE_SD_OTA_LOADING) {
+        } else if (current_state.state == BOOT_STATE_SD_OTA_LOADING) {
             // Draw SD OTA loading screen with progress
             draw_sd_ota_loading_screen(screenWidth, screenHeight, booting_animation_time);
-            booting_animation_time++;
-        } else if (current_boot_state == BOOT_STATE_ERROR) {
+        } else if (current_state.state == BOOT_STATE_ERROR) {
             // Draw error screen with restart button
             bool restart_requested = draw_error_screen(screenWidth, screenHeight, touch_handle);
             if (restart_requested) {
                 ESP_LOGI(TAG, "Restart requested by user - resetting to selection mode");
+                if (xSemaphoreTake(g_display_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    g_display_state.state = BOOT_STATE_SELECTING;
+                    g_display_state.app_name[0] = '\0';
+                    g_display_state.error_message[0] = '\0';
+                    xSemaphoreGive(g_display_mutex);
+                }
                 current_boot_state = BOOT_STATE_SELECTING;
                 selected_tile_index = -1;
                 booting_animation_time = 0;
@@ -942,8 +1196,20 @@ void raylib_task(void *pvParameter)
             }
         }
 
+        // CRITICAL: Update display heartbeat BEFORE EndDrawing
+        // This monitors if display rendering is blocked
+        g_display_heartbeat++;
+        if (g_display_heartbeat % 300 == 0) { // Every ~5 seconds at 60fps
+            ESP_LOGI(TAG, "Display heartbeat: %lu (Core %d)", g_display_heartbeat, xPortGetCoreID());
+        }
+
         // End drawing
         EndDrawing();
+
+        // VERY IMPORTANT: Small delay to prevent CPU starvation on other core
+        // But short enough to maintain 60fps
+        vTaskDelay(pdMS_TO_TICKS(2)); // 2ms delay = ~500fps max, ~60fps typical
+
         frameCounter++;
     }
 
@@ -987,17 +1253,32 @@ void app_main(void)
         return;
     }
 
-    ESP_LOGI(TAG, "Creating raylib task with %dKB stack...", RAYLIB_TASK_STACK_SIZE / 1024);
+    ESP_LOGI(TAG, "Creating raylib task with %dKB stack on Core 1...", RAYLIB_TASK_STACK_SIZE / 1024);
 
-    // Create dedicated task for raylib with large stack
+    // Create dedicated task for raylib with large stack (Core 1 - Display)
+    // HIGHER PRIORITY (6) to ensure display never gets blocked
     xTaskCreatePinnedToCore(
         raylib_task,              // Task function
         "raylib_task",            // Task name
         RAYLIB_TASK_STACK_SIZE,   // Stack size in bytes
         NULL,                     // Parameters
-        5,                        // Priority
-        NULL,                     // Task handle
-        1                         // Core ID (run on core 1)
+        configMAX_PRIORITIES - 2, // HIGH priority (6) - just below critical tasks
+        &g_display_task_handle,   // Task handle
+        1                         // Core ID (run on core 1 for display)
+    );
+
+    ESP_LOGI(TAG, "Creating SD card task with 8KB stack on Core 0...");
+
+    // Create dedicated task for SD card operations (Core 0 - I/O)
+    // LOWER PRIORITY (3) to prevent blocking of display
+    xTaskCreatePinnedToCore(
+        sd_card_task,             // Task function
+        "sd_card_task",           // Task name
+        8192,                     // Stack size in bytes (8KB)
+        NULL,                     // Parameters
+        3,                        // LOWER priority (3) - won't preempt display
+        &g_sd_card_task_handle,   // Task handle
+        0                         // Core ID (run on core 0 for I/O)
     );
 }
 
