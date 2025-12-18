@@ -20,6 +20,7 @@
 #include "esp_spiffs.h"
 #include "esp_vfs.h"
 #include "esp_vfs_fat.h"
+#include "sd_ota.h"
 
 #define TAG "GraphicalBootloader"
 #define RAYLIB_TASK_STACK_SIZE (128 * 1024)  // 128KB stack for software renderer
@@ -100,6 +101,7 @@ typedef struct {
 typedef enum {
     BOOT_STATE_SELECTING,
     BOOT_STATE_BOOTING,
+    BOOT_STATE_SD_OTA_LOADING,
     BOOT_STATE_ERROR
 } boot_state_t;
 
@@ -136,6 +138,57 @@ static const char* get_app_label_by_index(int app_index) {
     return "Unknown";
 }
 
+// Load OTA from SD card and boot to it
+static bool load_and_boot_from_sd_card(const char* filename, esp_partition_subtype_t partition_subtype) {
+    ESP_LOGI(TAG, "Starting SD card OTA process for %s...", filename);
+
+    // Set loading state for visual feedback
+    current_boot_state = BOOT_STATE_SD_OTA_LOADING;
+    booting_app_name = "Loading from SD Card";
+    booting_animation_time = 0;
+
+    // Initialize SD card
+    esp_err_t ret = sd_ota_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize SD card: %s", esp_err_to_name(ret));
+        current_boot_state = BOOT_STATE_ERROR;
+        return false;
+    }
+
+    // Check if file exists on SD card
+    ret = sd_ota_check_file(filename);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "OTA file not found on SD card: %s (%s)", filename, esp_err_to_name(ret));
+        current_boot_state = BOOT_STATE_ERROR;
+        sd_ota_cleanup();
+        return false;
+    }
+
+    // Flash file to partition
+    ret = sd_ota_flash_file(filename, partition_subtype);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to flash OTA from SD card: %s", esp_err_to_name(ret));
+        current_boot_state = BOOT_STATE_ERROR;
+        sd_ota_cleanup();
+        return false;
+    }
+
+    ESP_LOGI(TAG, "SD card OTA completed successfully!");
+    sd_ota_cleanup();
+
+    // Set booting state for final visual feedback
+    current_boot_state = BOOT_STATE_BOOTING;
+    booting_app_name = "SD Card Application";
+
+    // Add delay to show success animation
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    ESP_LOGI(TAG, "Restarting to boot from newly flashed OTA partition...");
+    esp_restart();
+
+    return true;
+}
+
 // Boot switching function using RTC register for bootloader communication
 static void ota_switch_to_app(int app_index) {
     ESP_LOGI(TAG, "Attempting to switch to app partition %d", app_index);
@@ -161,14 +214,24 @@ static void ota_switch_to_app(int app_index) {
 
     ESP_LOGI(TAG, "Preparing to boot application: %s (index: %d)", booting_app_name, app_index);
 
+    // Handle Demo 1 (app_index == 0) - Load from SD card and flash to OTA_1
+    if (app_index == 0) {
+        ESP_LOGI(TAG, "Demo 1 selected - loading ota1.bin from SD card to OTA_1 partition");
+        bool success = load_and_boot_from_sd_card("ota1.bin", ESP_PARTITION_SUBTYPE_APP_OTA_1);
+        if (!success) {
+            ESP_LOGE(TAG, "Failed to load OTA from SD card");
+            current_boot_state = BOOT_STATE_ERROR;
+            return;
+        }
+        return; // Function will not return as it restarts
+    }
+
     // Map app_index to partition type for bootloader
     uint32_t partition_type;
-    if (app_index == 0) {
-        partition_type = 1; // OTA_0 (4.8MB)
-    } else if (app_index == 1) {
-        partition_type = 2; // OTA_1 (4MB)
+    if (app_index == 1) {
+        partition_type = 1; // OTA_0 (4.8MB) - LVGL
     } else if (app_index == 2) {
-        partition_type = 3; // OTA_2 (4MB)
+        partition_type = 3; // OTA_2 (4MB) - Slint
     } else if (app_index >= 3 && app_index <= 8) {
         // Demo apps map to available OTA partitions (wrap around)
         partition_type = ((app_index - 3) % 3) + 1;
@@ -263,6 +326,90 @@ static void draw_booting_screen(int screenWidth, int screenHeight, int frameCoun
     const char* cornerMsg = "Please wait...";
     int cornerFontSize = 12;
     DrawText(cornerMsg, 5, screenHeight - 20, cornerFontSize, GRAY);
+}
+
+// Draw SD OTA loading screen with progress
+static void draw_sd_ota_loading_screen(int screenWidth, int screenHeight, int frameCounter) {
+    // Dark background during SD OTA loading
+    Color bgColor = (Color){30, 20, 40, 255}; // Slightly purple tint for SD card
+    ClearBackground(bgColor);
+
+    // Pulsing animation
+    float pulse = sinf(frameCounter * 0.03f) * 0.3f + 0.7f;
+
+    // Main loading message
+    const char* mainMessage = "Loading from SD Card...";
+    int mainFontSize = 28;
+    int mainWidth = MeasureText(mainMessage, mainFontSize);
+    int mainX = (screenWidth - mainWidth) / 2;
+    int mainY = screenHeight / 2 - 80;
+
+    Color mainColor = (Color){
+        (unsigned char)(255 * pulse),
+        (unsigned char)(200 * pulse),
+        (unsigned char)(255 * pulse),
+        255
+    };
+    DrawText(mainMessage, mainX, mainY, mainFontSize, mainColor);
+
+    // SD card icon representation
+    int sdCardWidth = 80;
+    int sdCardHeight = 60;
+    int sdCardX = (screenWidth - sdCardWidth) / 2;
+    int sdCardY = screenHeight / 2 - 20;
+
+    // Animated SD card shape
+    Color sdCardColor = (Color){
+        (unsigned char)(255 * pulse),
+        (unsigned char)(255 * pulse),
+        (unsigned char)(255 * pulse),
+        255
+    };
+    DrawRectangle(sdCardX, sdCardY, sdCardWidth, sdCardHeight, sdCardColor);
+    DrawRectangleLinesEx((Rectangle){sdCardX, sdCardY, sdCardWidth, sdCardHeight}, 3, WHITE);
+
+    // SD card corner notch
+    DrawRectangle(sdCardX + sdCardWidth - 15, sdCardY + 5, 10, 15, bgColor);
+
+    // Progress bar
+    int barWidth = 320;
+    int barHeight = 12;
+    int barX = (screenWidth - barWidth) / 2;
+    int barY = screenHeight / 2 + 70;
+
+    // Background bar
+    DrawRectangle(barX, barY, barWidth, barHeight, (Color){50, 50, 60, 255});
+
+    // Animated progress - simulate loading progress
+    int progress = (frameCounter * 3) % (barWidth + 60);
+    if (progress > barWidth) {
+        progress = barWidth - (progress - barWidth);
+    }
+    DrawRectangle(barX, barY, progress, barHeight, (Color){200, 150, 255, 255});
+
+    // Status text
+    const char* statusText = "Flashing ota1.bin to OTA_1 partition...";
+    int statusFontSize = 16;
+    int statusWidth = MeasureText(statusText, statusFontSize);
+    int statusX = (screenWidth - statusWidth) / 2;
+    int statusY = screenHeight / 2 + 50;
+    DrawText(statusText, statusX, statusY, statusFontSize, (Color){200, 200, 255, 255});
+
+    // Loading dots animation
+    int dotCount = (frameCounter / 25) % 4;
+    int dotStartX = (screenWidth - (dotCount * 20)) / 2;
+    int dotY = screenHeight / 2 + 100;
+
+    for (int i = 0; i < dotCount; i++) {
+        int dotX = dotStartX + i * 20;
+        int dotSize = 6 + (int)(sinf(frameCounter * 0.08f + i) * 2);
+        DrawCircleV((Vector2){dotX, dotY}, dotSize, (Color){200, 150, 255, (unsigned char)(255 * pulse)});
+    }
+
+    // Corner message
+    const char* cornerMsg = "Do not remove SD card!";
+    int cornerFontSize = 12;
+    DrawText(cornerMsg, 5, screenHeight - 20, cornerFontSize, (Color){255, 200, 200, 255});
 }
 
 // Draw error screen with restart button
@@ -362,7 +509,7 @@ static void show_bootloader_info(void) {
 // Initialize tiles with their labels and colors
 void initialize_tiles(Tile* tiles, int screenWidth, int screenHeight) {
     const char* labels[TILE_COUNT] = {
-        "Demo 1", "Demo 2", "Demo 3", "Demo 4",
+        "SD Card Demo", "Demo 2", "Demo 3", "Demo 4",
         "Demo 5", "Demo 6", "Demo 7", "Info"
     };
 
@@ -716,6 +863,10 @@ void raylib_task(void *pvParameter)
         if (current_boot_state == BOOT_STATE_BOOTING) {
             // Draw booting screen with animation
             draw_booting_screen(screenWidth, screenHeight, booting_animation_time);
+            booting_animation_time++;
+        } else if (current_boot_state == BOOT_STATE_SD_OTA_LOADING) {
+            // Draw SD OTA loading screen with progress
+            draw_sd_ota_loading_screen(screenWidth, screenHeight, booting_animation_time);
             booting_animation_time++;
         } else if (current_boot_state == BOOT_STATE_ERROR) {
             // Draw error screen with restart button

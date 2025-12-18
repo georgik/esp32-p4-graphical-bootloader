@@ -11,7 +11,7 @@ nvs,               data, nvs,     0x120000,  32K,
 otadata,           data, ota,     0x128000,  8K,
 bootloader_config, data, spiffs,  0x130000,  2M,
 
-# Large OTA slots for applications (total 12.8MB)
-ota_0,             app,  ota_0,   0x330000,  0x4CC000,
-ota_1,             app,  ota_1,   0x800000,  4M,
-ota_2,             app,  ota_2,   0xC00000,  4M,
+# Large OTA slots for applications (expanded for SD card loading)
+ota_0,             app,  ota_0,   0x330000,  4M,
+ota_1,             app,  ota_1,   0x730000,  6M,
+ota_2,             app,  ota_2,   0xD30000,  2M,

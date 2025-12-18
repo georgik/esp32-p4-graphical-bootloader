@@ -3,6 +3,7 @@ idf_component_register(
     SRCS
         "graphical_bootloader.c"
         "board_init.c"
+        "sd_ota.c"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES
@@ -13,5 +14,9 @@ idf_component_register(
         esp_timer
         esp_system
         spiffs                 # For configuration storage
+        app_update             # For OTA operations
+        esp_app_format         # For OTA operations
+        fatfs                  # For SD card filesystem
+        sdmmc                  # For SD card access
         # esp_raylib_port is pulled in via georgik__raylib dependency
 )
