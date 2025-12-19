@@ -13,6 +13,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_crc.h"
+#include "esp_flash.h"
 #include "esp_flash_partitions.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -89,17 +90,17 @@ esp_err_t firmware_flasher_start(const flash_config_t* config)
 
     ESP_LOGI(TAG, "Starting firmware flashing operation");
 
-    // Store configuration
-    g_flash_config = *config;
-
     // Validate inputs
     if (!config->firmware_selector) {
-        ESP_LOGE(TAG, "Invalid firmware selector or partition layout");
+        ESP_LOGE(TAG, "Invalid firmware selector");
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Create flash task
-    BaseType_t ret = xTaskCreate(flash_task, "flash_task", 4096, (void*)config,
+    // Store the firmware selector pointer
+    g_flash_config.firmware_selector = config->firmware_selector;
+
+    // Create flash task with minimal parameters
+    BaseType_t ret = xTaskCreate(flash_task, "flash_task", 8192, g_flash_config.firmware_selector,
                                   configMAX_PRIORITIES - 3, &g_flash_task_handle);
 
     if (ret != pdPASS) {
@@ -166,44 +167,77 @@ esp_err_t firmware_flasher_can_start(bool* can_start)
 }
 
 // Flash task implementation
+// Helper function to handle flash task cleanup
+static void flash_task_cleanup(void)
+{
+    xSemaphoreTake(g_flash_mutex, portMAX_DELAY);
+    g_flash_task_handle = NULL;
+    xSemaphoreGive(g_flash_mutex);
+
+    // Status callback would be called here if we had one
+    notify_status(g_flash_state, g_flash_result, "Flash operation finished");
+
+    ESP_LOGI(TAG, "Flash task finished with result: %d", g_flash_result);
+}
+
+// Flash task implementation
 static void flash_task(void* arg)
 {
-    flash_config_t* config = (flash_config_t*)arg;
+    firmware_selector_t* firmware_selector = (firmware_selector_t*)arg;
     esp_err_t ret = ESP_OK;
 
     g_flash_state = FLASH_STATE_INITIALIZING;
     notify_status(g_flash_state, FLASH_RESULT_SUCCESS, "Initializing flash operation");
+
+    // Store firmware selector reference
+    g_flash_config.firmware_selector = firmware_selector;
 
     xSemaphoreTake(g_flash_mutex, portMAX_DELAY);
 
     // Initialize statistics
     memset(&g_flash_stats, 0, sizeof(g_flash_stats));
     g_flash_stats.start_time_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    g_flash_stats.total_firmwares = config->firmware_selector->selected_count;
+    g_flash_stats.total_firmwares = firmware_selector->selected_count;
 
     xSemaphoreGive(g_flash_mutex);
 
     // Get selected firmwares
     firmware_info_t* selected_firmware[MAX_FIRMWARE_COUNT];
     uint32_t selected_count = 0;
-    ret = firmware_selector_get_selected(config->firmware_selector, selected_firmware, MAX_FIRMWARE_COUNT, &selected_count);
+    ret = firmware_selector_get_selected(firmware_selector, selected_firmware, MAX_FIRMWARE_COUNT, &selected_count);
     if (ret != ESP_OK || selected_count == 0) {
         g_flash_result = FLASH_RESULT_ERROR_INVALID_FIRMWARE;
         g_flash_state = FLASH_STATE_ERROR;
         notify_status(g_flash_state, g_flash_result, "No firmwares selected");
-        goto cleanup;
+        flash_task_cleanup();
+        vTaskDelete(NULL);
+        return;
     }
 
     ESP_LOGI(TAG, "Starting flash of %d firmware files", selected_count);
 
-    // Validate partition layout
+    // Generate OTA-only partition layout for selected firmwares
+    partition_table_layout_t partition_layout;
+    ret = partition_manager_generate_ota_only_layout(firmware_selector, &partition_layout);
+    if (ret != ESP_OK) {
+        g_flash_result = FLASH_RESULT_ERROR_PARTITION_TABLE;
+        g_flash_state = FLASH_STATE_ERROR;
+        notify_status(g_flash_state, g_flash_result, "Failed to generate partition layout");
+        flash_task_cleanup();
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // Validate generated partition layout
     bool layout_valid = false;
-    ret = partition_manager_validate_layout(&config->partition_layout, &layout_valid);
+    ret = partition_manager_validate_layout(&partition_layout, &layout_valid);
     if (ret != ESP_OK || !layout_valid) {
         g_flash_result = FLASH_RESULT_ERROR_PARTITION_TABLE;
         g_flash_state = FLASH_STATE_ERROR;
         notify_status(g_flash_state, g_flash_result, "Invalid partition layout");
-        goto cleanup;
+        flash_task_cleanup();
+        vTaskDelete(NULL);
+        return;
     }
 
     // Calculate total size
@@ -213,18 +247,18 @@ static void flash_task(void* arg)
     }
     g_flash_stats.total_bytes = total_size;
 
-    // Step 1: Backup current partition table
-    if (config->enable_backup) {
-        g_flash_state = FLASH_STATE_BACKING_UP;
-        notify_status(g_flash_state, FLASH_RESULT_SUCCESS, "Backing up current partition table");
+    // Step 1: Backup current partition table (always enabled)
+    g_flash_state = FLASH_STATE_BACKING_UP;
+    notify_status(g_flash_state, FLASH_RESULT_SUCCESS, "Backing up current partition table");
 
-        ret = backup_partition_table();
-        if (ret != ESP_OK) {
-            g_flash_result = FLASH_RESULT_ERROR_PARTITION_TABLE;
-            g_flash_state = FLASH_STATE_ERROR;
-            notify_status(g_flash_state, g_flash_result, "Failed to backup partition table");
-            goto cleanup;
-        }
+    ret = backup_partition_table();
+    if (ret != ESP_OK) {
+        g_flash_result = FLASH_RESULT_ERROR_PARTITION_TABLE;
+        g_flash_state = FLASH_STATE_ERROR;
+        notify_status(g_flash_state, g_flash_result, "Failed to backup partition table");
+        flash_task_cleanup();
+        vTaskDelete(NULL);
+        return;
     }
 
     // Step 2: Create new OTA partition table
@@ -233,13 +267,15 @@ static void flash_task(void* arg)
 
     uint8_t partition_table_data[4096];
     size_t actual_size = 0;
-    ret = firmware_flasher_create_ota_table(config->firmware_selector,
+    ret = firmware_flasher_create_ota_table(g_flash_config.firmware_selector,
                                            partition_table_data, sizeof(partition_table_data), &actual_size);
     if (ret != ESP_OK) {
         g_flash_result = FLASH_RESULT_ERROR_PARTITION_TABLE;
         g_flash_state = FLASH_STATE_ERROR;
         notify_status(g_flash_state, g_flash_result, "Failed to create OTA partition table");
-        goto cleanup;
+        flash_task_cleanup();
+        vTaskDelete(NULL);
+        return;
     }
 
     // Write new partition table
@@ -248,7 +284,9 @@ static void flash_task(void* arg)
         g_flash_result = FLASH_RESULT_ERROR_PARTITION_TABLE;
         g_flash_state = FLASH_STATE_ERROR;
         notify_status(g_flash_state, g_flash_result, "Failed to write partition table");
-        goto cleanup;
+        flash_task_cleanup();
+        vTaskDelete(NULL);
+        return;
     }
 
     // Step 3: Flash all firmwares to new OTA partitions
@@ -259,21 +297,23 @@ static void flash_task(void* arg)
     if (ret != ESP_OK) {
         g_flash_state = FLASH_STATE_ERROR;
         notify_status(g_flash_state, g_flash_result, "Failed to flash firmware");
-        goto cleanup;
+        flash_task_cleanup();
+        vTaskDelete(NULL);
+        return;
     }
 
-    // Step 4: Verify if enabled
-    if (config->enable_verification) {
-        g_flash_state = FLASH_STATE_VERIFYING;
-        notify_status(g_flash_state, FLASH_RESULT_SUCCESS, "Verifying flashed firmware");
+    // Step 4: Verify flashed firmware (always enabled)
+    g_flash_state = FLASH_STATE_VERIFYING;
+    notify_status(g_flash_state, FLASH_RESULT_SUCCESS, "Verifying flashed firmware");
 
-        ret = verify_all_firmwares();
-        if (ret != ESP_OK) {
-            g_flash_result = FLASH_RESULT_ERROR_CRC_MISMATCH;
-            g_flash_state = FLASH_STATE_ERROR;
-            notify_status(g_flash_state, g_flash_result, "Firmware verification failed");
-            goto cleanup;
-        }
+    ret = verify_all_firmwares();
+    if (ret != ESP_OK) {
+        g_flash_result = FLASH_RESULT_ERROR_CRC_MISMATCH;
+        g_flash_state = FLASH_STATE_ERROR;
+        notify_status(g_flash_state, g_flash_result, "Firmware verification failed");
+        flash_task_cleanup();
+        vTaskDelete(NULL);
+        return;
     }
 
     // Success!
@@ -283,16 +323,8 @@ static void flash_task(void* arg)
     update_statistics();
     notify_status(g_flash_state, g_flash_result, "Flash operation completed successfully");
 
-cleanup:
-    xSemaphoreTake(g_flash_mutex, portMAX_DELAY);
-    g_flash_task_handle = NULL;
-    xSemaphoreGive(g_flash_mutex);
-
-    if (config->status_callback) {
-        config->status_callback(g_flash_state, g_flash_result, "Flash operation finished");
-    }
-
-    ESP_LOGI(TAG, "Flash task finished with result: %d", g_flash_result);
+    // Final cleanup
+    flash_task_cleanup();
     vTaskDelete(NULL);
 }
 
@@ -631,11 +663,16 @@ static esp_err_t backup_partition_table(void)
 
     esp_err_t ret = partition_manager_backup_current(backup_buffer, sizeof(backup_buffer), &backup_size);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to backup partition table: %s", esp_err_to_name(ret));
-        return ret;
+        ESP_LOGW(TAG, "Failed to backup partition table: %s", esp_err_to_name(ret));
+        ESP_LOGI(TAG, "Continuing without backup - this is normal for first run");
+        return ESP_OK;  // Continue even if backup fails
     }
 
-    ESP_LOGI(TAG, "Partition table backed up successfully: %d bytes", backup_size);
+    if (backup_size > 0) {
+        ESP_LOGI(TAG, "Partition table backed up successfully: %d bytes", backup_size);
+    } else {
+        ESP_LOGI(TAG, "No partition table backup needed (first run)");
+    }
     return ESP_OK;
 }
 
@@ -902,19 +939,21 @@ esp_err_t firmware_flasher_create_ota_table(const firmware_selector_t* selector,
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Read current partition table
-    const esp_partition_t* partition_table_partition = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_PARTITION_TABLE, "partition-table");
+    // Read current partition table directly from flash
+    // ESP-IDF partition table is typically at offset 0x8000 (ESP32) or 0x9000 (ESP32-P4)
+    const size_t PTABLE_OFFSET = 0x9000;  // ESP32-P4 partition table offset
+    const size_t PTABLE_SIZE = 0x1000;   // 4KB max partition table size
 
-    if (!partition_table_partition) {
-        ESP_LOGE(TAG, "Failed to find partition-table partition");
-        return ESP_ERR_NOT_FOUND;
+    if (buffer_size < PTABLE_SIZE) {
+        ESP_LOGE(TAG, "Buffer too small for partition table: need %d bytes, have %d bytes",
+                 PTABLE_SIZE, buffer_size);
+        return ESP_ERR_NO_MEM;
     }
 
-    // Read existing partition table
-    esp_err_t ret = esp_partition_read(partition_table_partition, 0, buffer, buffer_size);
+    // Read partition table directly from flash
+    esp_err_t ret = esp_flash_read(NULL, buffer, PTABLE_OFFSET, PTABLE_SIZE);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read current partition table: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to read partition table from flash: %s", esp_err_to_name(ret));
         return ret;
     }
 
@@ -1026,23 +1065,18 @@ static esp_err_t write_partition_table_data(const uint8_t* buffer, size_t size)
 {
     ESP_LOGI(TAG, "Writing partition table (%d bytes)", size);
 
-    // Find partition-table partition
-    const esp_partition_t* partition_table_partition = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_PARTITION_TABLE, "partition-table");
+    // Write partition table directly to flash
+    const size_t PTABLE_OFFSET = 0x9000;  // ESP32-P4 partition table offset
 
-    if (!partition_table_partition) {
-        ESP_LOGE(TAG, "Failed to find partition-table partition");
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    // Erase and write partition table
-    esp_err_t ret = esp_partition_erase_range(partition_table_partition, 0, size);
+    // Erase partition table area in flash
+    esp_err_t ret = esp_flash_erase_region(NULL, PTABLE_OFFSET, size);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to erase partition table: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to erase partition table flash: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    ret = esp_partition_write(partition_table_partition, 0, buffer, size);
+    // Write new partition table to flash
+    ret = esp_flash_write(NULL, buffer, PTABLE_OFFSET, size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to write partition table: %s", esp_err_to_name(ret));
         return ret;

@@ -23,5 +23,6 @@ idf_component_register(
         esp_app_format         # For OTA operations
         fatfs                  # For SD card filesystem
         sdmmc                  # For SD card access
+        spi_flash              # For direct flash access
         # esp_raylib_port is pulled in via georgik__raylib dependency
 )

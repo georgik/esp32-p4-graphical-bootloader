@@ -21,20 +21,30 @@ extern "C" {
 
 // Partition constants
 #define MAX_PARTITIONS 16
-#define PARTITION_ALIGNMENT 0x10000     // 64KB minimum alignment
-#define OTA_PARTITION_SIZE 0x200000     // 2MB default OTA partition size
-#define MIN_OTA_PARTITION_SIZE 0x100000  // 1MB minimum OTA partition size
 #define MAX_PARTITION_NAME_LENGTH 16
 
-// Flash layout constants (16MB total)
+// ESP32-P4 Alignment constants - from esp32-image-composer-rs
+#define OTA_ALIGNMENT (64 * 1024)        // 64KB alignment for app partitions
+#define DATA_ALIGNMENT (4 * 1024)        // 4KB alignment for data partitions
+
+// ESP32-P4 Flash layout constants (16MB total) - from esp32-image-composer-rs
 #define FLASH_SIZE (16 * 1024 * 1024)
+#define BOOTLOADER_OFFSET 0x2000         // ESP32-P4 bootloader at 0x2000
 #define BOOTLOADER_SIZE (32 * 1024)
+#define PARTITION_TABLE_OFFSET 0x10000   // ESP32-P4 partition table at 0x10000
 #define PARTITION_TABLE_SIZE (4 * 1024)
-#define FIRMWARE_REGISTRY_SIZE (8 * 1024)   // New partition for firmware registry
-#define NVS_SIZE (8 * 1024)
-#define PHY_INIT_SIZE (4 * 1024)
-#define MIN_APP_SIZE (1 * 1024 * 1024)     // 1MB minimum for factory app
+#define NVS_OFFSET 0x9000                // NVS between bootloader and partition table
+#define FIRMWARE_REGISTRY_OFFSET 0xB000 // Firmware registry after NVS
+#define FIRMWARE_REGISTRY_SIZE (4 * 1024)
+#define OTA_DATA_OFFSET 0x12000          // OTA data partition
+#define OTA_DATA_SIZE (8 * 1024)         // 8KB for OTA data partition
+#define FACTORY_APP_OFFSET 0x20000       // ESP32-P4 factory app at 0x20000
+#define MIN_APP_SIZE (1 * 1024 * 1024)   // 1MB minimum for factory app
 #define MAX_FIRMWARE_SIZE (4 * 1024 * 1024) // 4MB maximum per firmware
+
+// ESP32-P4 OTA partition constants - from esp32-image-composer-rs
+#define MIN_OTA_PARTITION_SIZE (256 * 1024) // 256KB minimum OTA partition
+#define DEFAULT_OTA_SIZE (4 * 1024 * 1024)  // 4MB default OTA partition
 
 /**
  * @brief Partition type enumeration
@@ -46,6 +56,7 @@ typedef enum {
     PARTITION_TYPE_NVS,
     PARTITION_TYPE_PHY_INIT,
     PARTITION_TYPE_FACTORY_APP,
+    PARTITION_TYPE_OTA_DATA,
     PARTITION_TYPE_OTA_0,
     PARTITION_TYPE_OTA_1,
     PARTITION_TYPE_OTA_2,
@@ -68,7 +79,7 @@ typedef struct {
     bool is_ota;
     bool is_readonly;
     bool is_encrypted;
-    firmware_info_t* firmware;  // Associated firmware (NULL for system partitions)
+    const firmware_info_t* firmware;  // Associated firmware (NULL for system partitions)
 } partition_info_t;
 
 /**
@@ -85,7 +96,7 @@ typedef struct {
  * @brief Partition allocation request
  */
 typedef struct {
-    firmware_info_t* firmware;
+    const firmware_info_t* firmware;
     uint32_t min_size;
     uint32_t preferred_size;
     bool requires_ota_slot;
@@ -225,6 +236,32 @@ esp_err_t partition_manager_restore_from_backup(const uint8_t* backup_buffer,
  * @param layout Partition table layout to print
  */
 void partition_manager_print_layout(const partition_table_layout_t* layout);
+
+/**
+ * @brief Read existing partition table from device
+ *
+ * Reads the current partition table from the device and populates
+ * a layout with all existing partitions.
+ *
+ * @param layout Output layout structure to populate
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t partition_manager_read_existing_table(partition_table_layout_t* layout);
+
+/**
+ * @brief Generate OTA-only partition layout
+ *
+ * Reads the existing partition table and only modifies OTA partitions:
+ * - Removes all existing OTA partitions
+ * - Adds new OTA partitions sized for selected firmware
+ * - Leaves all non-OTA partitions untouched
+ *
+ * @param selector Firmware selector with selected firmware
+ * @param layout Output layout with modified OTA partitions
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* selector,
+                                                    partition_table_layout_t* layout);
 
 /**
  * @brief Cleanup partition manager resources

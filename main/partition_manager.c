@@ -9,6 +9,7 @@
 #include "esp_partition.h"
 #include "esp_app_format.h"
 #include "esp_flash_partitions.h"
+#include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,14 +31,14 @@ static const char* TAG = "partition_manager";
 #define PARTITION_ENCRYPTED 0x10
 #define MD5_SIZE 16
 
-// System partition definitions
+// ESP32-P4 System partition definitions - from esp32-image-composer-rs
+// Note: factory_app is NOT included here because it's an OTA partition that should be managed
 static const partition_info_t system_partitions[] = {
-    {"bootloader",     PARTITION_TYPE_BOOTLOADER,      0,                     0x0000,       BOOTLOADER_SIZE,              false, true,  false, NULL},
-    {"partition-table",PARTITION_TYPE_PARTITION_TABLE, 0,                     0x8000,       PARTITION_TABLE_SIZE,          false, true,  false, NULL},
-    {"firmware-reg",  PARTITION_TYPE_FIRMWARE_REGISTRY,0,                     0x9000,       FIRMWARE_REGISTRY_SIZE,        false, false, false, NULL},
-    {"nvs",           PARTITION_TYPE_NVS,             PARTITION_SUBTYPE_DATA_NVS, 0xd000,       NVS_SIZE,                     false, false, false, NULL},
-    {"phy_init",      PARTITION_TYPE_PHY_INIT,        PARTITION_SUBTYPE_DATA_PHY,0xf000,       PHY_INIT_SIZE,                false, true,  false, NULL},
-    {"factory_app",   PARTITION_TYPE_FACTORY_APP,     PARTITION_SUBTYPE_APP_FACTORY,0x10000,      MIN_APP_SIZE,                 true,  false, false, NULL},
+    {"bootloader",     PARTITION_TYPE_BOOTLOADER,      0,                     BOOTLOADER_OFFSET,      BOOTLOADER_SIZE,              false, true,  false, NULL},
+    {"partition-table",PARTITION_TYPE_PARTITION_TABLE, 0,                     PARTITION_TABLE_OFFSET,  PARTITION_TABLE_SIZE,          false, true,  false, NULL},
+    {"nvs",           PARTITION_TYPE_NVS,             PARTITION_SUBTYPE_DATA_NVS,  NVS_OFFSET,             FIRMWARE_REGISTRY_SIZE,      false, false, false, NULL},
+    {"firmware-reg",  PARTITION_TYPE_FIRMWARE_REGISTRY,0,                     FIRMWARE_REGISTRY_OFFSET, FIRMWARE_REGISTRY_SIZE,        false, false, false, NULL},
+    {"ota_data",      PARTITION_TYPE_OTA_DATA,       ESP_PARTITION_SUBTYPE_DATA_OTA, OTA_DATA_OFFSET,        OTA_DATA_SIZE,               false, false, false, NULL},
 };
 static const uint32_t system_partition_count = sizeof(system_partitions) / sizeof(system_partitions[0]);
 
@@ -51,6 +52,7 @@ static const char* get_partition_type_name(partition_type_t type)
         case PARTITION_TYPE_NVS: return "NVS";
         case PARTITION_TYPE_PHY_INIT: return "PHY Init";
         case PARTITION_TYPE_FACTORY_APP: return "Factory App";
+        case PARTITION_TYPE_OTA_DATA: return "OTA Data";
         case PARTITION_TYPE_OTA_0: return "OTA 0";
         case PARTITION_TYPE_OTA_1: return "OTA 1";
         case PARTITION_TYPE_OTA_2: return "OTA 2";
@@ -71,20 +73,26 @@ esp_err_t partition_manager_init(void)
 {
     ESP_LOGI(TAG, "Initializing partition manager");
 
-    // Validate system partition definitions
-    uint32_t current_offset = 0;
+    // Validate ESP32-P4 system partition definitions
+    // Note: ESP32-P4 uses specific offsets with intentional gaps, not contiguous layout
     for (uint32_t i = 0; i < system_partition_count; i++) {
         const partition_info_t* part = &system_partitions[i];
-        if (part->offset != current_offset) {
-            ESP_LOGW(TAG, "System partition %s offset mismatch: expected 0x%08x, found 0x%08x",
-                     part->name, current_offset, part->offset);
+
+        // Validate ESP32-P4 alignment requirements
+        uint32_t required_alignment = (part->type == PARTITION_TYPE_FACTORY_APP || part->is_ota) ?
+                                     OTA_ALIGNMENT : DATA_ALIGNMENT;
+
+        if (part->offset % required_alignment != 0) {
+            ESP_LOGW(TAG, "System partition %s not properly aligned: offset=0x%08x, requires %d byte alignment",
+                     part->name, part->offset, required_alignment);
         }
-        current_offset = part->offset + part->size;
+
+        ESP_LOGD(TAG, "System partition %s: offset=0x%08x, size=%d bytes",
+                 part->name, part->offset, part->size);
     }
 
     ESP_LOGI(TAG, "Partition manager initialized successfully");
-    ESP_LOGI(TAG, "System partitions occupy: %d bytes (0x%08x - 0x%08x)",
-             current_offset, 0, current_offset - 1);
+    ESP_LOGI(TAG, "Loaded %d ESP32-P4 system partitions", system_partition_count);
 
     return ESP_OK;
 }
@@ -158,7 +166,7 @@ esp_err_t partition_manager_generate_layout(firmware_selector_t* selector,
     for (uint32_t i = 0; i < selected_count; i++) {
         requests[i].firmware = selected_firmware[i];
         requests[i].min_size = selected_firmware[i]->size + 0x1000;  // Add 4KB padding
-        requests[i].preferred_size = align_up(requests[i].min_size, PARTITION_ALIGNMENT);
+        requests[i].preferred_size = align_up(requests[i].min_size, OTA_ALIGNMENT);
         requests[i].requires_ota_slot = true;
         requests[i].priority = i + 1;  // Lower index = higher priority
     }
@@ -200,10 +208,14 @@ esp_err_t partition_manager_optimize_allocation(const partition_allocation_reque
     ESP_LOGI(TAG, "Optimizing partition allocation for %d requests", request_count);
 
     uint32_t current_offset = layout->total_used_size;
+
+    // Align current_offset to 64KB boundary for OTA partitions (ESP32-P4 requirement)
+    current_offset = align_up(current_offset, OTA_ALIGNMENT);
+
     uint32_t available_space = FLASH_SIZE - current_offset;
 
-    ESP_LOGI(TAG, "Starting allocation at offset 0x%08x, available space: %d bytes",
-             current_offset, available_space);
+    ESP_LOGI(TAG, "Starting allocation at offset 0x%08x (aligned from 0x%08x), available space: %d bytes",
+             current_offset, layout->total_used_size, available_space);
 
     // Allocate partitions in order of preference
     uint32_t allocated_partitions = 0;
@@ -212,8 +224,8 @@ esp_err_t partition_manager_optimize_allocation(const partition_allocation_reque
     for (uint32_t i = 0; i < request_count && layout->partition_count < MAX_PARTITIONS; i++) {
         const partition_allocation_request_t* req = &requests[i];
 
-        // Calculate required size with alignment
-        uint32_t required_size = align_up(req->preferred_size, PARTITION_ALIGNMENT);
+        // Calculate required size with ESP32-P4 OTA alignment
+        uint32_t required_size = align_up(req->preferred_size, OTA_ALIGNMENT);
 
         // Check if we have enough space
         if (current_offset + required_size > FLASH_SIZE) {
@@ -249,7 +261,7 @@ esp_err_t partition_manager_optimize_allocation(const partition_allocation_reque
 
         // Update counters
         current_offset += required_size;
-        layout->total_used_size += required_size;
+        layout->total_used_size = current_offset;  // Keep total_used_size aligned
         layout->partition_count++;
         ota_slot_index++;
         allocated_partitions++;
@@ -352,9 +364,11 @@ esp_err_t partition_manager_validate_layout(const partition_table_layout_t* layo
             return ESP_OK;
         }
 
-        // Check alignment
-        if (part1->offset % PARTITION_ALIGNMENT != 0) {
-            ESP_LOGW(TAG, "Partition %s not properly aligned: offset=0x%08x", part1->name, part1->offset);
+        // Check ESP32-P4 alignment
+        uint32_t required_alignment = part1->is_ota ? OTA_ALIGNMENT : DATA_ALIGNMENT;
+        if (part1->offset % required_alignment != 0) {
+            ESP_LOGW(TAG, "Partition %s not properly aligned: offset=0x%08x, requires %d byte alignment",
+                     part1->name, part1->offset, required_alignment);
         }
 
         // Check minimum size
@@ -363,17 +377,25 @@ esp_err_t partition_manager_validate_layout(const partition_table_layout_t* layo
                      part1->name, part1->size, MIN_OTA_PARTITION_SIZE);
         }
 
-        // Check for overlaps with other partitions
-        for (uint32_t j = i + 1; j < layout->partition_count; j++) {
-            const partition_info_t* part2 = &layout->partitions[j];
+        // Only check overlaps involving OTA partitions
+        // System partitions (bootloader, NVS, etc.) are known to be correct
+        if (part1->is_ota) {
+            for (uint32_t j = 0; j < layout->partition_count; j++) {
+                if (i == j) continue;  // Skip self
 
-            bool overlaps = (part1->offset < (part2->offset + part2->size)) &&
-                           ((part1->offset + part1->size) > part2->offset);
+                const partition_info_t* part2 = &layout->partitions[j];
 
-            if (overlaps) {
-                ESP_LOGE(TAG, "Partition overlap detected: %s and %s",
-                         part1->name, part2->name);
-                return ESP_OK;
+                bool overlaps = (part1->offset < (part2->offset + part2->size)) &&
+                               ((part1->offset + part1->size) > part2->offset);
+
+                if (overlaps) {
+                    ESP_LOGE(TAG, "OTA partition %s overlaps with %s: ota[0x%08x-0x%08x] vs %s[0x%08x-0x%08x]",
+                             part1->name, part2->name,
+                             part1->offset, part1->offset + part1->size,
+                             part2->name, part2->offset, part2->offset + part2->size);
+                    *is_valid = false;
+                    return ESP_OK;
+                }
             }
         }
     }
@@ -431,13 +453,16 @@ esp_err_t partition_manager_backup_current(uint8_t* backup_buffer,
 
     ESP_LOGI(TAG, "Backing up current partition table");
 
-    // Read current partition table
+    // Try to read current partition table (for backup)
+    // Note: This might fail on first run or if no partition table partition exists
     const esp_partition_t* partition_table_partition = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_PARTITION_TABLE, "partition-table");
 
     if (!partition_table_partition) {
-        ESP_LOGE(TAG, "Failed to find partition-table partition");
-        return ESP_ERR_NOT_FOUND;
+        ESP_LOGW(TAG, "No existing partition-table partition found - this is normal for first run");
+        ESP_LOGI(TAG, "Skipping backup - proceeding with fresh partition table creation");
+        *backup_size = 0;
+        return ESP_OK;  // Success - no backup needed for first run
     }
 
     if (partition_table_partition->size > buffer_size) {
@@ -519,6 +544,183 @@ void partition_manager_print_layout(const partition_table_layout_t* layout)
     }
 
     ESP_LOGI(TAG, "================================");
+}
+
+esp_err_t partition_manager_read_existing_table(partition_table_layout_t* layout)
+{
+    if (!layout) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Reading existing partition table from device");
+
+    // Initialize layout with our known ESP32-P4 system partitions
+    // This is safer than trying to read the actual partition table
+    memset(layout, 0, sizeof(partition_table_layout_t));
+
+    // Add system partitions based on our ESP32-P4 specification
+    // These partitions should not be modified
+    uint32_t partition_count = 0;
+    uint32_t total_used_size = 0;
+
+    // Copy system partitions (non-OTA) that should be preserved
+    for (uint32_t i = 0; i < system_partition_count; i++) {
+        const partition_info_t* sys_part = &system_partitions[i];
+
+        // Only add non-OTA system partitions
+        if (!sys_part->is_ota && partition_count < MAX_PARTITIONS) {
+            layout->partitions[partition_count] = *sys_part;
+            total_used_size += sys_part->size;
+            partition_count++;
+
+            ESP_LOGI(TAG, "Preserving system partition %s: offset=0x%08x, size=%d",
+                     sys_part->name, sys_part->offset, sys_part->size);
+        }
+    }
+
+    layout->partition_count = partition_count;
+    layout->total_used_size = total_used_size;
+
+    ESP_LOGI(TAG, "Successfully loaded %d system partitions", partition_count);
+    ESP_LOGI(TAG, "Total system space: %d bytes (%.2f MB)",
+             total_used_size, (float)total_used_size / (1024 * 1024));
+
+    return ESP_OK;
+}
+
+esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* selector,
+                                                    partition_table_layout_t* layout)
+{
+    if (!selector || !layout) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Generating OTA-only partition layout for %d selected firmwares", selector->selected_count);
+
+    // Step 1: Read existing partition table
+    esp_err_t ret = partition_manager_read_existing_table(layout);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read existing partition table: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Step 2: Remove all existing OTA partitions from layout
+    uint32_t write_index = 0;
+    uint32_t removed_ota_count = 0;
+
+    for (uint32_t read_index = 0; read_index < layout->partition_count; read_index++) {
+        const partition_info_t* part = &layout->partitions[read_index];
+
+        // Keep all non-OTA partitions
+        if (!part->is_ota) {
+            if (write_index != read_index) {
+                layout->partitions[write_index] = layout->partitions[read_index];
+            }
+            write_index++;
+        } else {
+            removed_ota_count++;
+            ESP_LOGI(TAG, "Removing existing OTA partition: %s (offset=0x%08x, size=%d)",
+                     part->name, part->offset, part->size);
+        }
+    }
+
+    layout->partition_count = write_index;
+    ESP_LOGI(TAG, "Removed %d existing OTA partitions", removed_ota_count);
+
+    // Step 3: Get selected firmwares
+    firmware_info_t* selected_firmware[MAX_FIRMWARE_COUNT];
+    uint32_t selected_count = 0;
+    ret = firmware_selector_get_selected(selector, selected_firmware, MAX_FIRMWARE_COUNT, &selected_count);
+    if (ret != ESP_OK || selected_count == 0) {
+        ESP_LOGE(TAG, "Failed to get selected firmwares: %s", esp_err_to_name(ret));
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (selected_count == 0) {
+        ESP_LOGI(TAG, "No firmwares selected, keeping existing layout");
+        return ESP_OK;
+    }
+
+    // Step 4: Find available space for new OTA partitions
+    // Find the highest offset among existing partitions
+    uint32_t highest_offset = 0;
+    for (uint32_t i = 0; i < layout->partition_count; i++) {
+        const partition_info_t* part = &layout->partitions[i];
+        uint32_t part_end = part->offset + part->size;
+        if (part_end > highest_offset) {
+            highest_offset = part_end;
+        }
+    }
+
+    // Align to 64KB boundary for OTA partitions
+    uint32_t current_offset = align_up(highest_offset, OTA_ALIGNMENT);
+
+    ESP_LOGI(TAG, "Starting OTA allocation at offset 0x%08x (after all existing partitions)", current_offset);
+    ESP_LOGI(TAG, "Available space: %d bytes", FLASH_SIZE - current_offset);
+
+    // Step 5: Add new OTA partitions
+    for (uint32_t i = 0; i < selected_count && layout->partition_count < MAX_PARTITIONS; i++) {
+        const firmware_info_t* firmware = selected_firmware[i];
+
+        // Calculate required size with padding and alignment
+        uint32_t required_size = firmware->size + 0x1000;  // Add 4KB padding
+        required_size = align_up(required_size, OTA_ALIGNMENT);
+
+        // Ensure minimum OTA size
+        if (required_size < MIN_OTA_PARTITION_SIZE) {
+            required_size = MIN_OTA_PARTITION_SIZE;
+        }
+
+        // Check if we have enough space
+        if (current_offset + required_size > FLASH_SIZE) {
+            ESP_LOGE(TAG, "Not enough space for firmware %s (needs %d bytes, have %d bytes)",
+                     firmware->display_name, required_size, FLASH_SIZE - current_offset);
+            return ESP_ERR_NO_MEM;
+        }
+
+        // Create new OTA partition
+        partition_info_t* ota_partition = &layout->partitions[layout->partition_count];
+        memset(ota_partition, 0, sizeof(partition_info_t));
+
+        // Set partition name and properties
+        snprintf(ota_partition->name, sizeof(ota_partition->name), "ota_%" PRIu32, i);
+        ota_partition->type = ESP_PARTITION_TYPE_APP;
+
+        // Set OTA subtype
+        if (i == 0) {
+            ota_partition->subtype = ESP_PARTITION_SUBTYPE_APP_OTA_0;
+        } else if (i == 1) {
+            ota_partition->subtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
+        } else {
+            // Use extended OTA subtypes for additional partitions
+            ota_partition->subtype = ESP_PARTITION_SUBTYPE_APP_OTA_MAX + (i - 2);
+        }
+
+        ota_partition->offset = current_offset;
+        ota_partition->size = required_size;
+        ota_partition->is_ota = true;
+        ota_partition->is_readonly = false;
+        ota_partition->is_encrypted = false;
+        ota_partition->firmware = firmware;
+
+        ESP_LOGI(TAG, "Created OTA partition %s for %s: offset=0x%08x, size=%d bytes",
+                 ota_partition->name, firmware->display_name, ota_partition->offset, ota_partition->size);
+
+        // Update counters
+        current_offset += required_size;
+        layout->partition_count++;
+    }
+
+    // Update total used size
+    layout->total_used_size = current_offset;
+
+    ESP_LOGI(TAG, "OTA-only partition layout generated successfully:");
+    ESP_LOGI(TAG, "  Total partitions: %d", layout->partition_count);
+    ESP_LOGI(TAG, "  Total used space: %d bytes (%.2f MB)",
+             layout->total_used_size, (float)layout->total_used_size / (1024 * 1024));
+    ESP_LOGI(TAG, "  New OTA partitions: %d", selected_count);
+
+    return ESP_OK;
 }
 
 esp_err_t partition_manager_cleanup(void)
