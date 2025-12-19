@@ -9,6 +9,7 @@
 #include "firmware_selector.h"
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "esp_flash.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -36,6 +37,9 @@ static flash_statistics_t g_flash_stats = {0};
 static bool g_abort_requested = false;
 static TaskHandle_t g_flash_task_handle = NULL;
 static SemaphoreHandle_t g_flash_mutex = NULL;
+
+// Global partition layout for firmware flashing
+static partition_table_layout_t g_current_layout = {0};
 
 // Forward declarations
 static void flash_task(void* arg);
@@ -399,23 +403,20 @@ static esp_err_t flash_firmware_list(void)
         ESP_LOGI(TAG, "Flashing firmware %s to partition %s (0x%08x, %d bytes)",
                  firmware->display_name, partition_name, expected_offset, expected_size);
 
-        // Find the newly created OTA partition by name and subtype
-        const esp_partition_t* ota_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
-                                                                        ESP_PARTITION_SUBTYPE_APP_OTA_0 + i,
-                                                                        partition_name);
+        // Create a temporary esp_partition_t structure from our layout data
+        // This avoids issues with cached partition tables after writing new layout
+        esp_partition_t temp_partition = {0};
+        temp_partition.address = expected_offset;
+        temp_partition.size = expected_size;
+        temp_partition.type = ESP_PARTITION_TYPE_APP;
+        temp_partition.subtype = ESP_PARTITION_SUBTYPE_APP_OTA_0 + i;
+        temp_partition.encrypted = assigned_part->is_encrypted;
+        strncpy(temp_partition.label, partition_name, sizeof(temp_partition.label) - 1);
 
-        if (!ota_partition) {
-            ESP_LOGE(TAG, "Failed to find newly created OTA partition %s", partition_name);
-            notify_status(g_flash_state, FLASH_RESULT_ERROR_PARTITION_TABLE, "New OTA partition not found");
-            return ESP_ERR_NOT_FOUND;
-        }
+        ESP_LOGI(TAG, "Using dynamic partition from layout: %s (offset: 0x%08x, size: %u bytes)",
+                 temp_partition.label, temp_partition.address, temp_partition.size);
 
-        // Verify the partition has the correct offset and size
-        if (ota_partition->address != expected_offset) {
-            ESP_LOGE(TAG, "OTA partition offset mismatch: expected 0x%08x, found 0x%08x",
-                     expected_offset, ota_partition->address);
-            return ESP_ERR_INVALID_STATE;
-        }
+        const esp_partition_t* ota_partition = &temp_partition;
 
         ESP_LOGI(TAG, "Flashing firmware %d/%d: %s to %s (offset: 0x%08x, size: %d bytes, firmware size: %d bytes)",
                  i + 1, selected_count,
@@ -472,12 +473,19 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
         ESP_LOGW(TAG, "File size mismatch: expected %d, found %ld", firmware->size, file_size);
     }
 
-    // NOTE: esp_partition_write automatically handles erase
-    // No need for explicit erase - writing whole image is more efficient
-    ESP_LOGI(TAG, "Writing firmware to partition %s (automatic erase)", ota_partition->label);
+    esp_err_t ret;
+
+    // NOTE: We need to handle erase manually when using esp_flash_write
+    ESP_LOGI(TAG, "Erasing partition %s...", ota_partition->label);
+    ret = esp_flash_erase_region(NULL, ota_partition->address, ota_partition->size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to erase flash region: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Writing firmware to partition %s", ota_partition->label);
 
     // Flash firmware in chunks
-    esp_err_t ret;
     const uint32_t chunk_size = 4096; // 4KB chunks
     uint8_t* buffer = malloc(chunk_size);
     if (!buffer) {
@@ -505,10 +513,13 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
             return ESP_ERR_INVALID_RESPONSE;
         }
 
-        ret = esp_partition_write(ota_partition, bytes_flashed, buffer, bytes_read);
+        // Use direct flash write for temporary partition structure
+        // esp_partition_write doesn't work with our temporary esp_partition_t
+        uint32_t flash_offset = ota_partition->address + bytes_flashed;
+        ret = esp_flash_write(NULL, buffer, flash_offset, bytes_read);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to write to partition at offset %d: %s",
-                     bytes_flashed, esp_err_to_name(ret));
+            ESP_LOGE(TAG, "Failed to write to flash at offset 0x%08x: %s",
+                     flash_offset, esp_err_to_name(ret));
             free(buffer);
             fclose(file);
             return ret;
@@ -773,14 +784,20 @@ esp_err_t firmware_flasher_verify_single(const firmware_info_t* firmware,
     uint32_t expected_crc32 = firmware->crc32;
     ESP_LOGI(TAG, "Using stored CRC32: 0x%08X for firmware %s", expected_crc32, firmware->display_name);
 
-    // Get partition handle - use name-based lookup instead of subtype calculation
-    const esp_partition_t* flash_partition = esp_partition_find_first(
-        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, partition->name);
+    // Create a temporary esp_partition_t structure for direct flash operations
+    // This avoids issues with cached partition tables after writing new layout
+    esp_partition_t temp_partition = {0};
+    temp_partition.address = partition->offset;
+    temp_partition.size = partition->size;
+    temp_partition.type = ESP_PARTITION_TYPE_APP;
+    temp_partition.subtype = ESP_PARTITION_SUBTYPE_APP_OTA_0;  // Default subtype
+    temp_partition.encrypted = partition->is_encrypted;
+    strncpy(temp_partition.label, partition->name, sizeof(temp_partition.label) - 1);
 
-    if (!flash_partition) {
-        ESP_LOGE(TAG, "Failed to find partition for verification: %s", partition->name);
-        return ESP_ERR_NOT_FOUND;
-    }
+    ESP_LOGI(TAG, "Using direct flash access for verification: %s (offset: 0x%08x, size: %u bytes)",
+             temp_partition.label, temp_partition.address, temp_partition.size);
+
+    const esp_partition_t* flash_partition = &temp_partition;
 
     // Calculate CRC32 of flashed firmware
     uint32_t actual_crc32 = 0;
@@ -795,9 +812,12 @@ esp_err_t firmware_flasher_verify_single(const firmware_info_t* firmware,
             chunk_size = read_size - bytes_read;
         }
 
-        ret = esp_partition_read(flash_partition, bytes_read, buffer, chunk_size);
+        // Use direct flash read for temporary partition structure
+        // esp_partition_read doesn't work with our temporary esp_partition_t
+        uint32_t flash_offset = flash_partition->address + bytes_read;
+        ret = esp_flash_read(NULL, buffer, flash_offset, chunk_size);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to read from partition %s for verification", partition->name);
+            ESP_LOGE(TAG, "Failed to read from flash offset 0x%08x for verification", flash_offset);
             return ret;
         }
 
@@ -1094,8 +1114,7 @@ esp_err_t firmware_flasher_create_ota_table_from_layout(const firmware_selector_
     ESP_LOGI(TAG, "Creating OTA partition table from generated layout");
 
     // Use the OTA-only layout that was already generated by partition_manager
-    partition_table_layout_t ota_layout;
-    esp_err_t ret = partition_manager_generate_ota_only_layout((firmware_selector_t*)selector, &ota_layout);
+    esp_err_t ret = partition_manager_generate_ota_only_layout((firmware_selector_t*)selector, &g_current_layout);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to generate OTA-only layout: %s", esp_err_to_name(ret));
         return ret;
@@ -1110,8 +1129,8 @@ esp_err_t firmware_flasher_create_ota_table_from_layout(const firmware_selector_
     // Start with 0, partitions first
 
     // Add all partitions from our OTA-only layout
-    for (uint32_t i = 0; i < ota_layout.partition_count; i++) {
-        const partition_info_t* part = &ota_layout.partitions[i];
+    for (uint32_t i = 0; i < g_current_layout.partition_count; i++) {
+        const partition_info_t* part = &g_current_layout.partitions[i];
 
         if (partition_count >= (buffer_size / sizeof(esp_partition_info_t))) {
             ESP_LOGW(TAG, "Buffer too small for all partitions");

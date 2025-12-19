@@ -11,7 +11,6 @@ nvs,               data, nvs,     0x120000,  32K,
 otadata,           data, ota,     0x128000,  8K,
 bootloader_config, data, spiffs,  0x130000,  2M,
 
-# Large OTA slots for applications (expanded for SD card loading)
-ota_0,             app,  ota_0,   0x330000,  4M,
-ota_1,             app,  ota_1,   0x730000,  6M,
-ota_2,             app,  ota_2,   0xD30000,  2M,
+# OpenTyrian OTA partition - sized exactly for the firmware (1272160 bytes + padding)
+# 64KB aligned: 1.25MB (1310720 bytes = 0x140000)
+ota_0,             app,  ota_0,   0x330000,  1280K,

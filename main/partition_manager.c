@@ -842,18 +842,57 @@ esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* select
     ESP_LOGI(TAG, "Starting OTA allocation at offset 0x%08x (after all existing partitions)", current_offset);
     ESP_LOGI(TAG, "Available space: %d bytes", FLASH_SIZE - current_offset);
 
-    // Step 5: Add new OTA partitions with proper size calculation
+    // Step 5: Add new OTA partitions with dynamic size calculation
     for (uint32_t i = 0; i < selected_count && layout->partition_count < MAX_PARTITIONS; i++) {
         const firmware_info_t* firmware = selected_firmware[i];
 
         // Calculate required size with padding and alignment
-        uint32_t required_size = firmware->size + 0x1000;  // Add 4KB padding
+        uint32_t required_size = firmware->size + 0x1000;  // Add 4KB padding for safety margin
         required_size = align_up(required_size, OTA_ALIGNMENT);
 
         // Ensure minimum OTA size (64KB for ESP32)
         if (required_size < MIN_OTA_PARTITION_SIZE) {
             required_size = MIN_OTA_PARTITION_SIZE;
         }
+
+        // Calculate remaining available space for OTA partitions
+        uint32_t ota_start_offset = 0x00330000;  // First OTA partition offset (from working partition table)
+        uint32_t available_ota_space = FLASH_SIZE - ota_start_offset;
+
+        // For multiple firmware, divide available space proportionally
+        if (selected_count > 1) {
+            // Calculate total firmware size to determine proportional allocation
+            uint32_t total_firmware_size = 0;
+            for (uint32_t j = 0; j < selected_count; j++) {
+                uint32_t fw_size = selected_firmware[j]->size + 0x1000;
+                fw_size = align_up(fw_size, OTA_ALIGNMENT);
+                if (fw_size < MIN_OTA_PARTITION_SIZE) {
+                    fw_size = MIN_OTA_PARTITION_SIZE;
+                }
+                total_firmware_size += fw_size;
+            }
+
+            // Proportional allocation with minimum space
+            required_size = (firmware->size * available_ota_space) / total_firmware_size;
+            required_size = align_up(required_size, OTA_ALIGNMENT);
+
+            // Ensure minimum size and firmware fits
+            uint32_t fw_aligned_size = firmware->size + 0x1000;
+            fw_aligned_size = align_up(fw_aligned_size, OTA_ALIGNMENT);
+            if (required_size < fw_aligned_size) {
+                required_size = fw_aligned_size;
+            }
+        } else {
+            // Single firmware: use all available OTA space (firmware size + padding + remaining space)
+            uint32_t fw_aligned_size = firmware->size + 0x1000;
+            fw_aligned_size = align_up(fw_aligned_size, OTA_ALIGNMENT);
+
+            // Use firmware size + all remaining OTA space
+            required_size = fw_aligned_size;
+        }
+
+        ESP_LOGI(TAG, "Dynamic OTA sizing for %s: firmware=%d, required=%d, available_ota=%d",
+                 firmware->display_name, firmware->size, required_size, available_ota_space);
 
         // Check if we have enough space
         if (current_offset + required_size > FLASH_SIZE) {

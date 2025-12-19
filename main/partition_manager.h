@@ -40,11 +40,11 @@ extern "C" {
 #define OTA_DATA_SIZE (8 * 1024)         // 8KB for OTA data partition
 #define FACTORY_APP_OFFSET 0x20000       // ESP32-P4 factory app at 0x20000
 #define MIN_APP_SIZE (1 * 1024 * 1024)   // 1MB minimum for factory app
-#define MAX_FIRMWARE_SIZE (4 * 1024 * 1024) // 4MB maximum per firmware
+#define MAX_FIRMWARE_SIZE (8 * 1024 * 1024) // 8MB maximum per firmware (updated for larger firmwares)
 
-// ESP32-P4 OTA partition constants - from esp32-image-composer-rs
-#define MIN_OTA_PARTITION_SIZE (256 * 1024) // 256KB minimum OTA partition
-#define DEFAULT_OTA_SIZE (4 * 1024 * 1024)  // 4MB default OTA partition
+// ESP32-P4 OTA partition constants - dynamic sizing
+#define MIN_OTA_PARTITION_SIZE (64 * 1024)  // 64KB minimum OTA partition (ESP32 requirement)
+#define DYNAMIC_OTA_SIZE (0)               // 0 = dynamic sizing based on firmware size
 
 /**
  * @brief Partition type enumeration
