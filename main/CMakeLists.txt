@@ -25,5 +25,6 @@ idf_component_register(
         sdmmc                  # For SD card access
         spi_flash              # For direct flash access
         nvs_flash              # For firmware configuration storage
+        mbedtls                # For MD5 checksum calculation
         # esp_raylib_port is pulled in via georgik__raylib dependency
 )

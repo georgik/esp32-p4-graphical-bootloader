@@ -15,12 +15,15 @@
 #include "esp_crc.h"
 #include "esp_flash.h"
 #include "esp_flash_partitions.h"
+#include "mbedtls/md5.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
+#include <inttypes.h>
 #include <stdio.h>
 
 static const char* TAG = "firmware_flasher";
+
 
 #define ESP_PARTITION_SUBTYPE_DATA_PARTITION_TABLE 0x01
 #define MD5_SIZE 16
@@ -44,6 +47,7 @@ static esp_err_t verify_firmware_in_partition(const firmware_info_t* firmware,
                                                const esp_partition_t* ota_partition);
 // static esp_err_t firmware_flasher_create_ota_table - declared in header
 static esp_err_t write_partition_table_data(const uint8_t* buffer, size_t size);
+static void hexdump_and_verify_partition_table(size_t expected_size, const uint8_t* expected_buffer);
 static esp_err_t backup_partition_table(void);
 static esp_err_t verify_all_firmwares(void);
 static void update_statistics(void);
@@ -1102,9 +1106,8 @@ esp_err_t firmware_flasher_create_ota_table_from_layout(const firmware_selector_
     esp_partition_info_t* partitions = (esp_partition_info_t*)buffer;
     uint32_t partition_count = 0;
 
-    // ESP-IDF partition table format: first entry is MD5 (filled later), then partitions
-    memset(&partitions[0], 0, sizeof(esp_partition_info_t));  // MD5 entry (will be filled by system)
-    partition_count = 1;  // Start with 1 for MD5 entry
+    // ESP-IDF partition table format: partitions first (32 bytes each), then MD5 entry (32 bytes)
+    // Start with 0, partitions first
 
     // Add all partitions from our OTA-only layout
     for (uint32_t i = 0; i < ota_layout.partition_count; i++) {
@@ -1118,25 +1121,106 @@ esp_err_t firmware_flasher_create_ota_table_from_layout(const firmware_selector_
         esp_partition_info_t* entry = &partitions[partition_count];
         memset(entry, 0, sizeof(esp_partition_info_t));
 
+        // CRITICAL: Set magic number for ESP32 partition table validation
+        entry->magic = ESP_PARTITION_MAGIC; // 0x50AA
+
         // Convert our internal format to ESP-IDF format
         strncpy((char*)entry->label, part->name, sizeof(entry->label) - 1);
-        entry->type = part->type;
+
+        // Map internal types to ESP32 partition types
+        // All application partitions (OTA + factory) should be APP type
+        if (part->is_ota || part->subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY) {
+            entry->type = ESP_PARTITION_TYPE_APP;  // 0x00
+        } else {
+            entry->type = ESP_PARTITION_TYPE_DATA; // 0x01
+        }
+
+        // Use the original subtype from the ESP32 partition table
         entry->subtype = part->subtype;
-        entry->pos.offset = part->offset;
-        entry->pos.size = part->size;
+        entry->pos.offset = part->offset;  // ESP32 is little-endian, no conversion needed
+
+        // DEBUG: Log size assignment
+        ESP_LOGI(TAG, "DEBUG: FW Flasher - part->size=%d (0x%08X), part->name='%s'",
+                 part->size, part->size, part->name);
+
+        entry->pos.size = part->size;  // ESP32 is little-endian, no conversion needed
+
+        // DEBUG: Log size after assignment
+        ESP_LOGI(TAG, "DEBUG: FW Flasher - entry->pos.size=%d (0x%08X)",
+                 entry->pos.size, entry->pos.size);
+
         entry->flags = 0;
 
         if (part->is_encrypted) {
             entry->flags |= PART_FLAG_ENCRYPTED;
         }
 
-        ESP_LOGI(TAG, "Adding partition: %s type=%d subtype=%d offset=0x%08x size=%d",
-                 entry->label, entry->type, entry->subtype, entry->pos.offset, entry->pos.size);
+        ESP_LOGI(TAG, "Adding partition: %s type=%d subtype=%d offset=0x%08x size=%d magic=0x%04X",
+                 entry->label, entry->type, entry->subtype, entry->pos.offset, entry->pos.size, entry->magic);
 
         partition_count++;
     }
 
-    // Set actual size
+    // Add MD5 entry after all partitions (working partition table format)
+    // CRITICAL: MD5 entry is NOT an esp_partition_info_t structure!
+    // It's a simple 32-byte block with this exact format:
+    // - First 16 bytes: 0xEB, 0xEB, followed by 0xFF * 14
+    // - Next 16 bytes: Actual MD5 hash of all partition entries
+    esp_partition_info_t* md5_entry = &partitions[partition_count];
+
+    // Create the exact working pattern: EBEB + 0xFF*14
+    uint8_t md5_pattern[32];
+    memset(md5_pattern, 0xFF, sizeof(md5_pattern)); // Start with 0xFF
+
+    // First 16 bytes: EBEB + 0xFF*14 (exact working pattern)
+    md5_pattern[0] = 0xEB;
+    md5_pattern[1] = 0xEB;
+    // remaining 14 bytes are already 0xFF from memset
+
+    // Copy the 32-byte pattern over the esp_partition_info_t structure
+    memcpy(md5_entry, md5_pattern, sizeof(md5_pattern));
+
+    // Calculate and write the MD5 hash of all partition entries (excluding MD5 entry itself)
+    // Using mbedtls for MD5 calculation
+    mbedtls_md5_context md5_ctx;
+    mbedtls_md5_init(&md5_ctx);
+    mbedtls_md5_starts(&md5_ctx);
+
+    // Hash all partition entries before the MD5 entry
+    mbedtls_md5_update(&md5_ctx, (const unsigned char*)partitions,
+                      partition_count * sizeof(esp_partition_info_t));
+
+    unsigned char md5_hash[16];
+    mbedtls_md5_finish(&md5_ctx, md5_hash);
+    mbedtls_md5_free(&md5_ctx);
+
+    ESP_LOGI(TAG, "MD5 entry added, calculated MD5=%02x%02x%02x%02x...",
+             md5_hash[0], md5_hash[1], md5_hash[2], md5_hash[3]);
+
+    // CRITICAL: Write the MD5 hash to bytes 16-31 of the MD5 entry (0xB0-0xBF in partition table)
+    // The MD5 entry is a 32-byte block: first 16 bytes = EBEB + 0xFF*14, next 16 bytes = MD5 hash
+    uint8_t* md5_entry_bytes = (uint8_t*)md5_entry;
+    memcpy(md5_entry_bytes + 16, md5_hash, 16);
+
+    ESP_LOGI(TAG, "MD5 hash written to bytes 16-31 of MD5 entry (0x%02X-0x%02X in partition table)",
+             (unsigned int)(md5_entry_bytes + 16 - (uint8_t*)partitions),
+             (unsigned int)(md5_entry_bytes + 31 - (uint8_t*)partitions));
+
+    partition_count++; // Include MD5 entry in total count
+
+    // Add partition table terminator entries with 0xFFFF magic number
+    // ESP32 partition table needs terminator entries to properly mark end of valid entries
+    const int max_partitions = 32; // ESP32 max partition entries
+    int terminators_added = 0;
+    while (partition_count < max_partitions) {
+        esp_partition_info_t* terminator_entry = &partitions[partition_count];
+        memset(terminator_entry, 0xFF, sizeof(esp_partition_info_t)); // Fill with 0xFFFF
+        partition_count++;
+        terminators_added++;
+    }
+    ESP_LOGI(TAG, "Added %d terminator entries with 0xFFFF magic numbers", terminators_added);
+
+    // Set actual size: partition entries (each 32 bytes)
     *actual_size = partition_count * sizeof(esp_partition_info_t);
 
     ESP_LOGI(TAG, "OTA partition table created successfully:");
@@ -1144,6 +1228,98 @@ esp_err_t firmware_flasher_create_ota_table_from_layout(const firmware_selector_
     ESP_LOGI(TAG, "  Table size: %d bytes", *actual_size);
 
     return ESP_OK;
+}
+
+// Hexdump and verify partition table after writing
+static void hexdump_and_verify_partition_table(size_t expected_size, const uint8_t* expected_buffer)
+{
+    ESP_LOGI(TAG, "Reading back partition table for verification...");
+
+    // Allocate buffer on heap to avoid stack overflow
+    uint8_t* read_buffer = malloc(4096);  // ESP32 partition table max size is 0x1000 (4KB)
+    if (read_buffer == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for partition table verification");
+        return;
+    }
+
+    esp_err_t ret = esp_flash_read(NULL, read_buffer, 0x10000, 4096);  // ESP32-P4 partition table offset
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read back partition table: %s", esp_err_to_name(ret));
+        free(read_buffer);
+        return;
+    }
+
+    ESP_LOGI(TAG, "=== PARTITION TABLE HEXDUMP (first 512 bytes) ===");
+    for (int i = 0; i < 512 && i < (int)expected_size; i += 16) {
+        char hex_line[64];
+        char ascii_line[17];
+        int hex_pos = 0;
+        int ascii_pos = 0;
+
+        for (int j = 0; j < 16 && (i + j) < 512 && (i + j) < (int)expected_size; j++) {
+            hex_pos += snprintf(hex_line + hex_pos, sizeof(hex_line) - hex_pos, "%02X ", read_buffer[i + j]);
+            ascii_line[ascii_pos++] = (read_buffer[i + j] >= 32 && read_buffer[i + j] <= 126) ? read_buffer[i + j] : '.';
+        }
+        ascii_line[ascii_pos] = '\0';
+
+        ESP_LOGI(TAG, "%04X: %-48s %s", i, hex_line, ascii_line);
+    }
+
+    // Verify partition entries match expectations
+    ESP_LOGI(TAG, "=== PARTITION ENTRY VERIFICATION ===");
+    const uint32_t entry_size = sizeof(esp_partition_info_t);
+    int num_entries = expected_size / entry_size;
+
+    for (int i = 0; i < num_entries; i++) {
+        const esp_partition_info_t* written = (const esp_partition_info_t*)expected_buffer + i;
+        const esp_partition_info_t* read_back = (const esp_partition_info_t*)read_buffer + i;
+
+        bool magic_match = (written->magic == read_back->magic);
+        bool type_match = (written->type == read_back->type);
+        bool subtype_match = (written->subtype == read_back->subtype);
+        bool offset_match = (written->pos.offset == read_back->pos.offset);
+        bool size_match = (written->pos.size == read_back->pos.size);
+        bool label_match = (strncmp((char*)written->label, (char*)read_back->label, 16) == 0);
+
+        ESP_LOGI(TAG, "Entry %d: %s", i, (magic_match && type_match && subtype_match && offset_match && size_match && label_match) ? "✓ PASS" : "✗ FAIL");
+
+        if (!magic_match) ESP_LOGW(TAG, "  Magic: wrote 0x%04X, read 0x%04X", written->magic, read_back->magic);
+        if (!type_match) ESP_LOGW(TAG, "  Type: wrote %d, read %d", written->type, read_back->type);
+        if (!subtype_match) ESP_LOGW(TAG, "  Subtype: wrote %d, read %d", written->subtype, read_back->subtype);
+        if (!offset_match) ESP_LOGW(TAG, "  Offset: wrote 0x%08X, read 0x%08X", written->pos.offset, read_back->pos.offset);
+        if (!size_match) ESP_LOGW(TAG, "  Size: wrote 0x%08X, read 0x%08X", written->pos.size, read_back->pos.size);
+        if (!label_match) ESP_LOGW(TAG, "  Label: wrote '%.16s', read '%.16s'", written->label, read_back->label);
+
+        if (written->magic == 0x50AA) {  // Valid partition entry
+            ESP_LOGI(TAG, "  Partition: '%.16s' type=%d subtype=%d offset=0x%08X size=0x%08X",
+                     read_back->label, read_back->type, read_back->subtype,
+                     read_back->pos.offset, read_back->pos.size);
+        }
+    }
+
+    // Check for MD5 entry specifically
+    if (expected_size > entry_size * num_entries) {
+        const esp_partition_info_t* md5_written = (const esp_partition_info_t*)expected_buffer + num_entries;
+        const esp_partition_info_t* md5_read = (const esp_partition_info_t*)read_buffer + num_entries;
+
+        ESP_LOGI(TAG, "=== MD5 ENTRY VERIFICATION ===");
+        bool md5_magic_match = (md5_written->magic == md5_read->magic);
+        ESP_LOGI(TAG, "MD5 magic: %s (wrote 0x%04X, read 0x%04X)",
+                 md5_magic_match ? "✓ PASS" : "✗ FAIL", md5_written->magic, md5_read->magic);
+
+        if (md5_magic_match) {
+            ESP_LOGI(TAG, "MD5 data verification:");
+            for (int i = 0; i < 16; i++) {
+                uint8_t written_byte = ((uint8_t*)md5_written->label)[i];
+                uint8_t read_byte = ((uint8_t*)md5_read->label)[i];
+                bool byte_match = (written_byte == read_byte);
+                ESP_LOGI(TAG, "  MD5[%d]: 0x%02X %s 0x%02X", i, written_byte, byte_match ? "=" : "!=", read_byte);
+            }
+        }
+    }
+
+    // Clean up heap allocation
+    free(read_buffer);
 }
 
 static esp_err_t write_partition_table_data(const uint8_t* buffer, size_t size)
@@ -1205,6 +1381,10 @@ static esp_err_t write_partition_table_data(const uint8_t* buffer, size_t size)
 
     ESP_LOGI(TAG, "Partition table update completed successfully");
     ESP_LOGI(TAG, "Note: Device will need to restart to use new partition table");
+
+    // Step 4: Comprehensive hexdump and verification
+    ESP_LOGI(TAG, "=== PARTITION TABLE VERIFY & HEXDUMP ===");
+    hexdump_and_verify_partition_table(size, buffer);
 
     return ESP_OK;
 }

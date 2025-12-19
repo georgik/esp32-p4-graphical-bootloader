@@ -9,13 +9,17 @@
 #include "esp_partition.h"
 #include "esp_app_format.h"
 #include "esp_flash_partitions.h"
+#include "esp_flash.h"
+#include "mbedtls/md5.h"
 #include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <arpa/inet.h>  // For htonl function
 
 static const char* TAG = "partition_manager";
+
 
 // Standard ESP32 partition subtypes
 #define PARTITION_SUBTYPE_APP_FACTORY ESP_PARTITION_SUBTYPE_APP_FACTORY
@@ -293,20 +297,26 @@ esp_err_t partition_manager_create_binary(const partition_table_layout_t* layout
 
     ESP_LOGI(TAG, "Creating partition table binary with %d partitions", layout->partition_count);
 
-    // Calculate required size
-    size_t required_size = sizeof(esp_partition_info_t) * layout->partition_count + MD5_SIZE;
+    // Calculate required size: partition entries + 1 MD5 entry
+    size_t required_size = sizeof(esp_partition_info_t) * (layout->partition_count + 1);
     if (buffer_size < required_size) {
         ESP_LOGE(TAG, "Buffer too small: need %d bytes, have %d bytes", required_size, buffer_size);
         return ESP_ERR_NO_MEM;
     }
 
+    // Initialize buffer with flash default value (0xFF)
+    memset(buffer, 0xFF, buffer_size);
+
     // Create partition entries
     esp_partition_info_t* partition_entries = (esp_partition_info_t*)buffer;
-    memset(partition_entries, 0, sizeof(esp_partition_info_t) * layout->partition_count);
+    memset(partition_entries, 0, sizeof(esp_partition_info_t) * (layout->partition_count + 1));
 
     for (uint32_t i = 0; i < layout->partition_count; i++) {
         const partition_info_t* part = &layout->partitions[i];
         esp_partition_info_t* entry = &partition_entries[i];
+
+        // CRITICAL: Set magic number for ESP32 partition table validation
+        entry->magic = ESP_PARTITION_MAGIC; // 0x50AA
 
         // Copy partition information
         strncpy((char*)entry->label, part->name, sizeof(entry->label) - 1);
@@ -314,25 +324,110 @@ esp_err_t partition_manager_create_binary(const partition_table_layout_t* layout
 
         entry->type = part->is_ota ? ESP_PARTITION_TYPE_APP : ESP_PARTITION_TYPE_DATA;
         entry->subtype = part->subtype;
-        entry->pos.offset = part->offset;
-        // entry->size = part->size; // Field not available - using safer approach
+        entry->pos.offset = part->offset;  // ESP32 is little-endian, no conversion needed
+
+        // DEBUG: Log size before assignment
+        ESP_LOGI(TAG, "DEBUG: Assigning size - part->size=%d (0x%08X), part->name='%s'",
+                 part->size, part->size, part->name);
+
+        entry->pos.size = part->size;  // ESP32 is little-endian, no conversion needed
+
+        // DEBUG: Log size after assignment
+        ESP_LOGI(TAG, "DEBUG: Assigned size - entry->pos.size=%d (0x%08X)",
+                 entry->pos.size, entry->pos.size);
+
         entry->flags = 0;
 
         if (part->is_encrypted) {
             entry->flags |= PARTITION_ENCRYPTED;
         }
 
-        ESP_LOGD(TAG, "Partition %d: %s @ 0x%08x, size=0x%08x, type=0x%02x, subtype=0x%02x",
-                 i, entry->label, entry->pos.offset, part->size, entry->type, entry->subtype);
+        ESP_LOGI(TAG, "Partition %d: %s @ 0x%08x, size=0x%08x, type=0x%02x, subtype=0x%02x, magic=0x%04X",
+                 i, entry->label, entry->pos.offset, entry->pos.size, entry->type, entry->subtype, entry->magic);
     }
 
-    // Calculate MD5 hash (placeholder - ESP-IDF would normally do this)
-    uint8_t* md5_location = buffer + sizeof(esp_partition_info_t) * layout->partition_count;
-    memset(md5_location, 0, MD5_SIZE);
+    // Create MD5 checksum entry with correct ESP-IDF format from esp-idf-part project
+    esp_partition_info_t* md5_entry = &partition_entries[layout->partition_count];
+    memset(md5_entry, 0xFF, sizeof(esp_partition_info_t)); // Start with 0xFF
+
+    // CRITICAL: MD5 entry structure from esp-idf-part project:
+    // - First 16 bytes: 0xEB, 0xEB, followed by 0xFF * 14
+    // - Next 16 bytes: actual MD5 hash of all partition entries
+    md5_entry->magic = ESP_PARTITION_MAGIC_MD5; // 0xEBEB for MD5 entry
+    md5_entry->type = 0xFF;
+    md5_entry->subtype = 0xFF;
+    md5_entry->pos.offset = 0xFFFFFFFF;
+    md5_entry->pos.size = 0xFFFFFFFF;
+    md5_entry->flags = 0xFFFFFFFF;
+
+    // MD5 magic pattern from esp-idf-part: {0xEB, 0xEB, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+    uint8_t md5_magic_pattern[16] = {
+        0xEB, 0xEB, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+    };
+    memcpy(md5_entry->label, md5_magic_pattern, sizeof(md5_magic_pattern));
+
+    // Calculate proper MD5 checksum of all partition entries (excluding MD5 entry itself)
+    mbedtls_md5_context md5_ctx;
+    mbedtls_md5_init(&md5_ctx);
+    mbedtls_md5_starts(&md5_ctx);
+
+    // Hash all partition entries (32 bytes each, layout->partition_count entries)
+    mbedtls_md5_update(&md5_ctx, (const unsigned char*)partition_entries,
+                      layout->partition_count * sizeof(esp_partition_info_t));
+
+    unsigned char md5_hash[16];
+    mbedtls_md5_finish(&md5_ctx, md5_hash);
+    mbedtls_md5_free(&md5_ctx);
+
+    // CRITICAL: Store MD5 hash in label + 16 (after the magic pattern)
+    // This matches the esp-idf-part format: first 16 bytes magic, next 16 bytes hash
+    memcpy(md5_entry->label + 16, md5_hash, 16);
+
+    ESP_LOGI(TAG, "MD5 entry created with magic 0x%04X and proper checksum", md5_entry->magic);
+    ESP_LOG_BUFFER_HEX(TAG, md5_hash, 16);
 
     *actual_size = required_size;
 
-    ESP_LOGI(TAG, "Partition table binary created successfully: %d bytes", *actual_size);
+    ESP_LOGI(TAG, "Partition table binary created successfully: %d bytes (%d partitions + 1 MD5 entry)",
+             *actual_size, layout->partition_count);
+
+    // Verify the first entry has correct magic number
+    ESP_LOGI(TAG, "Verification: First partition magic = 0x%04X (expected: 0x%04X)",
+             partition_entries[0].magic, ESP_PARTITION_MAGIC);
+
+    // Log complete partition table for validation
+    ESP_LOGI(TAG, "=== GENERATED PARTITION TABLE DUMP ===");
+    for (uint32_t i = 0; i <= layout->partition_count; i++) {
+        esp_partition_info_t* entry = &partition_entries[i];
+        ESP_LOGI(TAG, "Entry %d: magic=0x%04X, type=0x%02X, subtype=0x%02X, offset=0x%08X, size=0x%08X, label='%.16s'",
+                 i, entry->magic, entry->type, entry->subtype, entry->pos.offset, entry->pos.size, entry->label);
+    }
+
+    // Validate that the head matches expected structure until OTA
+    ESP_LOGI(TAG, "=== PARTITION TABLE VALIDATION ===");
+    const char* expected_order[] = {"factory_app", "nvs", "otadata", "bootloader_confi", "ota_0"};
+    bool order_valid = true;
+
+    for (uint32_t i = 0; i < layout->partition_count && i < 5; i++) {
+        const partition_info_t* part = &layout->partitions[i];
+        ESP_LOGI(TAG, "Position %d: expected='%s', actual='%s', offset=0x%08X, size=0x%08X",
+                 i, expected_order[i], part->name, part->offset, part->size);
+
+        if (strcmp(part->name, expected_order[i]) != 0) {
+            ESP_LOGW(TAG, "ORDER MISMATCH at position %d: expected '%s', found '%s'",
+                     i, expected_order[i], part->name);
+            order_valid = false;
+        }
+    }
+
+    if (order_valid) {
+        ESP_LOGI(TAG, "✓ Partition table order validation PASSED");
+    } else {
+        ESP_LOGW(TAG, "✗ Partition table order validation FAILED");
+    }
+    ESP_LOGI(TAG, "=== END VALIDATION ===");
+
     return ESP_OK;
 }
 
@@ -552,39 +647,129 @@ esp_err_t partition_manager_read_existing_table(partition_table_layout_t* layout
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "Reading existing partition table from device");
+    ESP_LOGI(TAG, "Reading existing partition table from flash at offset 0x%08x", PARTITION_TABLE_OFFSET);
 
-    // Initialize layout with our known ESP32-P4 system partitions
-    // This is safer than trying to read the actual partition table
+    // Allocate buffer on heap to avoid stack overflow
+    uint8_t* raw_table = malloc(4096);  // One flash sector
+    if (raw_table == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for partition table reading");
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = esp_flash_read(NULL, raw_table, PARTITION_TABLE_OFFSET, 4096);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read partition table from flash: %s", esp_err_to_name(ret));
+        free(raw_table);
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Successfully read partition table from flash");
+
+    // Initialize layout
     memset(layout, 0, sizeof(partition_table_layout_t));
-
-    // Add system partitions based on our ESP32-P4 specification
-    // These partitions should not be modified
     uint32_t partition_count = 0;
     uint32_t total_used_size = 0;
 
-    // Copy system partitions (non-OTA) that should be preserved
-    for (uint32_t i = 0; i < system_partition_count; i++) {
-        const partition_info_t* sys_part = &system_partitions[i];
+    // Parse partition table entries
+    esp_partition_info_t* entries = (esp_partition_info_t*)raw_table;
 
-        // Only add non-OTA system partitions
-        if (!sys_part->is_ota && partition_count < MAX_PARTITIONS) {
-            layout->partitions[partition_count] = *sys_part;
-            total_used_size += sys_part->size;
+    ESP_LOGI(TAG, "=== EXISTING PARTITION TABLE DUMP ===");
+    for (uint32_t i = 0; i < MAX_PARTITIONS; i++) {
+        esp_partition_info_t* entry = &entries[i];
+
+        // Check for MD5 entry (magic 0xEBEB) - stop here
+        if (entry->magic == ESP_PARTITION_MAGIC_MD5) {
+            ESP_LOGI(TAG, "MD5 entry found at position %d", i);
+            break;
+        }
+
+        // Check for valid partition entry
+        if (entry->magic != ESP_PARTITION_MAGIC) {
+            ESP_LOGI(TAG, "Invalid magic 0x%04X at position %d, stopping", entry->magic, i);
+            break;
+        }
+
+        // Log detailed partition information
+        ESP_LOGI(TAG, "Partition %d: magic=0x%04X, type=0x%02X, subtype=0x%02X, offset=0x%08X, size=0x%08X, label='%.16s'",
+                 i, entry->magic, entry->type, entry->subtype, entry->pos.offset, entry->pos.size, entry->label);
+
+        // Convert to our partition_info_t structure
+        if (partition_count < MAX_PARTITIONS) {
+            partition_info_t* part = &layout->partitions[partition_count];
+
+            // Copy name (truncate if necessary)
+            strncpy(part->name, (char*)entry->label, sizeof(part->name) - 1);
+            part->name[sizeof(part->name) - 1] = '\0';
+
+            // Determine partition type and OTA status
+            if (entry->type == ESP_PARTITION_TYPE_APP) {
+                part->type = PARTITION_TYPE_FACTORY_APP;  // Default
+
+                // Check specific OTA subtype - only OTA slots are considered OTA
+                if (entry->subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY) {
+                    part->type = PARTITION_TYPE_FACTORY_APP;
+                    part->is_ota = false;  // Factory app is NOT OTA - should be preserved
+                } else if (entry->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0) {
+                    part->type = PARTITION_TYPE_OTA_0;
+                    part->is_ota = true;
+                } else if (entry->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_1) {
+                    part->type = PARTITION_TYPE_OTA_1;
+                    part->is_ota = true;
+                } else if (entry->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_2) {
+                    part->type = PARTITION_TYPE_OTA_2;
+                    part->is_ota = true;
+                } else {
+                    // Unknown APP subtype - check if it's factory_app by name
+                    if (strcmp(part->name, "factory_app") == 0) {
+                        part->type = PARTITION_TYPE_FACTORY_APP;
+                        part->is_ota = false;  // factory_app is NOT OTA
+                    } else {
+                        part->is_ota = true;  // Other APP partitions are OTA
+                    }
+                }
+            } else if (entry->type == ESP_PARTITION_TYPE_DATA) {
+                part->is_ota = false;
+                // Map data subtypes
+                switch (entry->subtype) {
+                    case ESP_PARTITION_SUBTYPE_DATA_NVS:
+                        part->type = PARTITION_TYPE_NVS;
+                        break;
+                    case ESP_PARTITION_SUBTYPE_DATA_OTA:
+                        part->type = PARTITION_TYPE_OTA_DATA;
+                        break;
+                    default:
+                        part->type = PARTITION_TYPE_NVS;  // Default
+                        break;
+                }
+            } else {
+                part->is_ota = false;
+                part->type = PARTITION_TYPE_NVS;  // Default unknown type
+            }
+
+            part->subtype = entry->subtype;  // Preserve original ESP32 subtype
+            part->offset = entry->pos.offset;
+            part->size = entry->pos.size;
+            part->is_encrypted = (entry->flags & PARTITION_ENCRYPTED) != 0;
+            part->firmware = NULL;
+
+            ESP_LOGI(TAG, "Loaded partition %s: type=%d, is_ota=%d, offset=0x%08x, size=%d",
+                     part->name, part->type, part->is_ota, part->offset, part->size);
+
+            total_used_size += part->size;
             partition_count++;
-
-            ESP_LOGI(TAG, "Preserving system partition %s: offset=0x%08x, size=%d",
-                     sys_part->name, sys_part->offset, sys_part->size);
         }
     }
 
     layout->partition_count = partition_count;
     layout->total_used_size = total_used_size;
 
-    ESP_LOGI(TAG, "Successfully loaded %d system partitions", partition_count);
-    ESP_LOGI(TAG, "Total system space: %d bytes (%.2f MB)",
+    ESP_LOGI(TAG, "=== END PARTITION TABLE DUMP ===");
+    ESP_LOGI(TAG, "Successfully loaded %d partitions from flash", partition_count);
+    ESP_LOGI(TAG, "Total used space: %d bytes (%.2f MB)",
              total_used_size, (float)total_used_size / (1024 * 1024));
 
+    // Clean up heap allocation
+    free(raw_table);
     return ESP_OK;
 }
 
@@ -611,7 +796,7 @@ esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* select
     for (uint32_t read_index = 0; read_index < layout->partition_count; read_index++) {
         const partition_info_t* part = &layout->partitions[read_index];
 
-        // Keep all non-OTA partitions
+        // Keep all non-OTA partitions (factory_app, nvs, otadata, bootloader_confi)
         if (!part->is_ota) {
             if (write_index != read_index) {
                 layout->partitions[write_index] = layout->partitions[read_index];
@@ -626,6 +811,14 @@ esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* select
 
     layout->partition_count = write_index;
     ESP_LOGI(TAG, "Removed %d existing OTA partitions", removed_ota_count);
+
+    ESP_LOGI(TAG, "=== PRESERVED PARTITIONS (NON-OTA) ===");
+    for (uint32_t i = 0; i < layout->partition_count; i++) {
+        const partition_info_t* part = &layout->partitions[i];
+        ESP_LOGI(TAG, "Preserved %d: %s @ 0x%08x, size=%d, type=%d, is_ota=%d",
+                 i, part->name, part->offset, part->size, part->type, part->is_ota);
+    }
+    ESP_LOGI(TAG, "=== END PRESERVED PARTITIONS ===");
 
     // Step 3: Get selected firmwares
     firmware_info_t* selected_firmware[MAX_FIRMWARE_COUNT];
@@ -642,14 +835,14 @@ esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* select
     }
 
     // Step 4: Start OTA partitions at fixed offset to match existing layout
-    // ESP32-P4 OTA partitions start at 0x330000 (from existing partition table)
+    // ESP32-P4 OTA partitions start at 0x330000 (after bootloader_confi)
     const uint32_t OTA_START_OFFSET = 0x330000;
     uint32_t current_offset = OTA_START_OFFSET;
 
     ESP_LOGI(TAG, "Starting OTA allocation at offset 0x%08x (after all existing partitions)", current_offset);
     ESP_LOGI(TAG, "Available space: %d bytes", FLASH_SIZE - current_offset);
 
-    // Step 5: Add new OTA partitions
+    // Step 5: Add new OTA partitions with proper size calculation
     for (uint32_t i = 0; i < selected_count && layout->partition_count < MAX_PARTITIONS; i++) {
         const firmware_info_t* firmware = selected_firmware[i];
 
@@ -657,7 +850,7 @@ esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* select
         uint32_t required_size = firmware->size + 0x1000;  // Add 4KB padding
         required_size = align_up(required_size, OTA_ALIGNMENT);
 
-        // Ensure minimum OTA size
+        // Ensure minimum OTA size (64KB for ESP32)
         if (required_size < MIN_OTA_PARTITION_SIZE) {
             required_size = MIN_OTA_PARTITION_SIZE;
         }
@@ -682,22 +875,21 @@ esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* select
             ota_partition->subtype = ESP_PARTITION_SUBTYPE_APP_OTA_0;
         } else if (i == 1) {
             ota_partition->subtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
+        } else if (i == 2) {
+            ota_partition->subtype = ESP_PARTITION_SUBTYPE_APP_OTA_2;
         } else {
-            // Use extended OTA subtypes for additional partitions
-            ota_partition->subtype = ESP_PARTITION_SUBTYPE_APP_OTA_MAX + (i - 2);
+            ota_partition->subtype = ESP_PARTITION_SUBTYPE_APP_OTA_0 + i;
         }
 
         ota_partition->offset = current_offset;
         ota_partition->size = required_size;
         ota_partition->is_ota = true;
-        ota_partition->is_readonly = false;
         ota_partition->is_encrypted = false;
-        ota_partition->firmware = firmware;
+        ota_partition->firmware = (void*)firmware;  // Store firmware reference
 
-        ESP_LOGI(TAG, "Created OTA partition %s for %s: offset=0x%08x, size=%d bytes",
-                 ota_partition->name, firmware->display_name, ota_partition->offset, ota_partition->size);
+        ESP_LOGI(TAG, "Created OTA partition %s for %s: offset=0x%08x, size=%d bytes (0x%08X) (calc: %d + padding)",
+                 ota_partition->name, firmware->display_name, ota_partition->offset, ota_partition->size, ota_partition->size, firmware->size);
 
-        // Update counters
         current_offset += required_size;
         layout->partition_count++;
     }
@@ -707,8 +899,8 @@ esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* select
 
     ESP_LOGI(TAG, "OTA-only partition layout generated successfully:");
     ESP_LOGI(TAG, "  Total partitions: %d", layout->partition_count);
-    ESP_LOGI(TAG, "  Total used space: %d bytes (%.2f MB)",
-             layout->total_used_size, (float)layout->total_used_size / (1024 * 1024));
+    ESP_LOGI(TAG, "  Total used space: %d bytes (%.2f MB)", layout->total_used_size,
+             (float)layout->total_used_size / (1024 * 1024));
     ESP_LOGI(TAG, "  New OTA partitions: %d", selected_count);
 
     return ESP_OK;
