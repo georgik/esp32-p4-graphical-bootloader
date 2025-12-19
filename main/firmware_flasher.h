@@ -254,6 +254,17 @@ esp_err_t firmware_flasher_create_ota_table_from_layout(const firmware_selector_
                                                           size_t buffer_size,
                                                           size_t* actual_size);
 
+/**
+ * @brief Create complete flash binary from current partitions
+ *
+ * Reads all current partitions and creates a single binary file that can be
+ * flashed from offset 0x0. OTA partitions are filled with zeros.
+ *
+ * @param output_file Path to output binary file
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t firmware_flasher_create_complete_binary(const char* output_file);
+
 #ifdef __cplusplus
 }
 #endif

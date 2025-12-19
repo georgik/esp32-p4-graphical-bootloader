@@ -1504,3 +1504,106 @@ static esp_err_t write_partition_table_data(const uint8_t* buffer, size_t size)
 
     return ESP_OK;
 }
+
+esp_err_t firmware_flasher_create_complete_binary(const char* output_file)
+{
+    if (!output_file) {
+        ESP_LOGE(TAG, "Output file path is required");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Creating complete flash binary: %s", output_file);
+
+    // Use 16MB flash size for ESP32-P4
+    const uint32_t total_flash_size = FLASH_SIZE;
+    uint8_t* flash_buffer = calloc(1, total_flash_size);
+    if (!flash_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate memory for flash buffer (%u bytes)", total_flash_size);
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t result = ESP_OK;
+
+    // Read current partition table
+    partition_table_layout_t current_layout = {0};
+    result = partition_manager_read_existing_table(&current_layout);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read current partition table: %s", esp_err_to_name(result));
+        free(flash_buffer);
+        return result;
+    }
+
+    ESP_LOGI(TAG, "Found %u partitions in current layout", current_layout.partition_count);
+
+    // Copy all partitions to flash buffer
+    for (uint32_t i = 0; i < current_layout.partition_count; i++) {
+        partition_info_t* partition = &current_layout.partitions[i];
+
+        ESP_LOGI(TAG, "Processing partition %u: %s (type=%u, subtype=%u, offset=0x%08x, size=%u)",
+                 i, partition->name, partition->type, partition->subtype,
+                 partition->offset, partition->size);
+
+        // Check partition bounds
+        if (partition->offset + partition->size > total_flash_size) {
+            ESP_LOGW(TAG, "Partition %s exceeds flash size, skipping", partition->name);
+            continue;
+        }
+
+        // Check if this is an OTA partition
+        bool is_ota_partition = false;
+        if (partition->type == PARTITION_TYPE_OTA_0 || partition->type == PARTITION_TYPE_OTA_1 ||
+            partition->type == PARTITION_TYPE_OTA_2 || partition->type == PARTITION_TYPE_OTA_3 ||
+            partition->type == PARTITION_TYPE_OTA_4 || partition->type == PARTITION_TYPE_OTA_5) {
+            is_ota_partition = true;
+        }
+
+        if (is_ota_partition) {
+            // Fill OTA partitions with zeros
+            ESP_LOGI(TAG, "OTA partition %s: filling with zeros", partition->name);
+            memset(flash_buffer + partition->offset, 0, partition->size);
+        } else {
+            // Read actual partition data
+            ESP_LOGI(TAG, "Reading partition %s from flash", partition->name);
+            result = esp_flash_read(NULL, flash_buffer + partition->offset, partition->offset, partition->size);
+            if (result != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to read partition %s: %s", partition->name, esp_err_to_name(result));
+                continue; // Continue with other partitions
+            }
+
+            ESP_LOGI(TAG, "Successfully read partition %s (%u bytes)", partition->name, partition->size);
+        }
+    }
+
+    // Write the complete binary to file
+    FILE* file = fopen(output_file, "wb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to create output file: %s", output_file);
+        free(flash_buffer);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    size_t written = fwrite(flash_buffer, 1, total_flash_size, file);
+    fclose(file);
+
+    if (written != total_flash_size) {
+        ESP_LOGE(TAG, "Failed to write complete binary to file (written=%zu, expected=%u)",
+                 written, total_flash_size);
+        result = ESP_ERR_INVALID_RESPONSE;
+    } else {
+        ESP_LOGI(TAG, "Successfully created complete flash binary: %s (%u bytes)",
+                 output_file, total_flash_size);
+
+        // Log partition summary
+        ESP_LOGI(TAG, "=== PARTITION SUMMARY ===");
+        for (uint32_t i = 0; i < current_layout.partition_count; i++) {
+            partition_info_t* partition = &current_layout.partitions[i];
+            bool is_ota = (partition->type >= PARTITION_TYPE_OTA_0 && partition->type <= PARTITION_TYPE_OTA_5);
+            ESP_LOGI(TAG, "  %s: 0x%08x-0x%08x (%u bytes) %s",
+                     partition->name, partition->offset, partition->offset + partition->size - 1,
+                     partition->size, is_ota ? "[OTA - ZEROED]" : "[COPIED]");
+        }
+    }
+
+    free(flash_buffer);
+    return result;
+}

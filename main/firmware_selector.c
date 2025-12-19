@@ -296,6 +296,44 @@ static void fw_flash_status_callback(flash_state_t state, flash_result_t result,
              g_active_firmware_selector ? g_active_firmware_selector->completion_modal : NULL,
              g_active_firmware_selector ? g_active_firmware_selector->completion_label : NULL);
 
+    // Update status label based on current state
+    if (g_active_firmware_selector && g_active_firmware_selector->status_label) {
+        switch (state) {
+            case FLASH_STATE_INITIALIZING:
+                lv_label_set_text(g_active_firmware_selector->status_label, "Initializing");
+                break;
+            case FLASH_STATE_BACKING_UP:
+                lv_label_set_text(g_active_firmware_selector->status_label, "Backing up");
+                break;
+            case FLASH_STATE_WRITING_PARTITION_TABLE:
+                lv_label_set_text(g_active_firmware_selector->status_label, "Writing partition table");
+                break;
+            case FLASH_STATE_FLASHING_FIRMWARE:
+                // Use the status message for firmware flashing state if available
+                if (status_message && strlen(status_message) > 0) {
+                    lv_label_set_text(g_active_firmware_selector->status_label, status_message);
+                } else {
+                    lv_label_set_text(g_active_firmware_selector->status_label, "Flashing");
+                }
+                break;
+            case FLASH_STATE_VERIFYING:
+                lv_label_set_text(g_active_firmware_selector->status_label, "Verifying");
+                break;
+            case FLASH_STATE_CLEANING_UP:
+                lv_label_set_text(g_active_firmware_selector->status_label, "Cleaning up");
+                break;
+            case FLASH_STATE_COMPLETED:
+                lv_label_set_text(g_active_firmware_selector->status_label, "Ready");
+                break;
+            case FLASH_STATE_ERROR:
+                lv_label_set_text(g_active_firmware_selector->status_label, "Error");
+                break;
+            default:
+                lv_label_set_text(g_active_firmware_selector->status_label, "Ready");
+                break;
+        }
+    }
+
     // When flashing completes (successfully or not), clear the flashing in progress state
     if (state == FLASH_STATE_COMPLETED) {
         flashing_in_progress = false;

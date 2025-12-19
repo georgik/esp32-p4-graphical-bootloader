@@ -517,6 +517,19 @@ void refresh_main_screen(void)
     create_main_screen();
 
     ESP_LOGI(TAG, "Main screen refreshed successfully");
+
+    // Ensure the main screen is set as current screen (in case LVGL lost track)
+    lv_scr_load(main_screen);
+    current_screen = SCREEN_MAIN;
+
+    ESP_LOGI(TAG, "Main screen set as current screen");
+
+    // Force LVGL to refresh the display and handle any pending events
+    lv_timer_handler();
+    lv_tick_inc(lv_tick_get());
+
+    // Small delay to ensure LVGL has time to process the screen changes
+    vTaskDelay(pdMS_TO_TICKS(100));
 }
 
 // Progress bar for OTA operations
@@ -526,14 +539,14 @@ void create_progress_bar(void)
 
     progress_bar = lv_bar_create(main_screen);
     lv_obj_set_size(progress_bar, 300, 20);
-    lv_obj_align(progress_bar, LV_ALIGN_BOTTOM_MID, 0, -80);
+    lv_obj_align(progress_bar, LV_ALIGN_BOTTOM_RIGHT, -50, -30);
     lv_bar_set_range(progress_bar, 0, 100);
     lv_bar_set_value(progress_bar, 0, LV_ANIM_OFF);
 
     progress_label = lv_label_create(main_screen);
     lv_obj_add_style(progress_label, &style_status, 0);
     lv_label_set_text(progress_label, "0%");
-    lv_obj_align_to(progress_label, progress_bar, LV_ALIGN_OUT_BOTTOM_MID, 0, 5);
+    lv_obj_align_to(progress_label, progress_bar, LV_ALIGN_OUT_LEFT_MID, 10, 0);
 
     ESP_LOGI(TAG, "Progress bar created");
 }
