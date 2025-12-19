@@ -8,7 +8,7 @@ factory_app,        app,  factory, 0x20000,   1M,
 
 # Storage partitions - moved after factory app for better layout
 nvs,               data, nvs,     0x120000,  32K,
-otadata,           data, ota,     0x128000,  8K,
+bootdata,          data, ota,     0x128000,  8K,
 bootloader_config, data, spiffs,  0x130000,  2M,
 
 # OpenTyrian OTA partition - sized exactly for the firmware (1272160 bytes + padding)

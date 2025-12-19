@@ -475,15 +475,7 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
 
     esp_err_t ret;
 
-    // NOTE: We need to handle erase manually when using esp_flash_write
-    ESP_LOGI(TAG, "Erasing partition %s...", ota_partition->label);
-    ret = esp_flash_erase_region(NULL, ota_partition->address, ota_partition->size);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to erase flash region: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "Writing firmware to partition %s", ota_partition->label);
+    ESP_LOGI(TAG, "Writing firmware to partition %s (with erase-on-demand)", ota_partition->label);
 
     // Flash firmware in chunks
     const uint32_t chunk_size = 4096; // 4KB chunks
@@ -513,9 +505,22 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
             return ESP_ERR_INVALID_RESPONSE;
         }
 
-        // Use direct flash write for temporary partition structure
-        // esp_partition_write doesn't work with our temporary esp_partition_t
+        // Use direct flash write with sector erase-on-demand
         uint32_t flash_offset = ota_partition->address + bytes_flashed;
+        uint32_t sector_size = 4096;  // 4KB sectors for ESP32
+        uint32_t sector_start = (flash_offset / sector_size) * sector_size;
+        uint32_t sector_end = ((flash_offset + bytes_read + sector_size - 1) / sector_size) * sector_size;
+
+        // Erase only the sectors we need to write
+        ret = esp_flash_erase_region(NULL, sector_start, sector_end - sector_start);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to erase flash region 0x%08x: %s", sector_start, esp_err_to_name(ret));
+            free(buffer);
+            fclose(file);
+            return ret;
+        }
+
+        // Write to the erased region
         ret = esp_flash_write(NULL, buffer, flash_offset, bytes_read);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to write to flash at offset 0x%08x: %s",

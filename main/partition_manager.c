@@ -406,7 +406,7 @@ esp_err_t partition_manager_create_binary(const partition_table_layout_t* layout
 
     // Validate that the head matches expected structure until OTA
     ESP_LOGI(TAG, "=== PARTITION TABLE VALIDATION ===");
-    const char* expected_order[] = {"factory_app", "nvs", "otadata", "bootloader_confi", "ota_0"};
+    const char* expected_order[] = {"factory_app", "nvs", "bootdata", "bootloader_confi", "ota_0"};
     bool order_valid = true;
 
     for (uint32_t i = 0; i < layout->partition_count && i < 5; i++) {
@@ -796,7 +796,7 @@ esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* select
     for (uint32_t read_index = 0; read_index < layout->partition_count; read_index++) {
         const partition_info_t* part = &layout->partitions[read_index];
 
-        // Keep all non-OTA partitions (factory_app, nvs, otadata, bootloader_confi)
+        // Keep all non-OTA partitions (factory_app, nvs, bootdata, bootloader_confi)
         if (!part->is_ota) {
             if (write_index != read_index) {
                 layout->partitions[write_index] = layout->partitions[read_index];
