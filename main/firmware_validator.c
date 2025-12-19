@@ -317,3 +317,52 @@ esp_err_t firmware_get_validation_status(const firmware_validation_result_t* res
 
     return ESP_OK;
 }
+
+esp_err_t firmware_calculate_fast_crc32(const char* file_path, uint32_t file_size, uint32_t* crc32)
+{
+    if (!file_path || !crc32) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    FILE* file = fopen(file_path, "rb");
+    if (!file) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    const uint32_t SAMPLE_SIZE = 4096; // 4KB samples
+    uint32_t calculated_crc = 0xFFFFFFFF;
+    bool small_file = (file_size <= 2 * SAMPLE_SIZE);
+
+    if (small_file) {
+        // For small files (≤8KB), calculate full CRC
+        uint8_t buffer[1024];
+        size_t bytes_read;
+
+        while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+            calculated_crc = esp_crc32_le(calculated_crc, buffer, bytes_read);
+        }
+    } else {
+        // For large files, sample first 4KB and last 4KB
+        uint8_t buffer[SAMPLE_SIZE];
+
+        // Sample first 4KB
+        size_t bytes_read = fread(buffer, 1, SAMPLE_SIZE, file);
+        if (bytes_read == SAMPLE_SIZE) {
+            calculated_crc = esp_crc32_le(calculated_crc, buffer, bytes_read);
+        }
+
+        // Seek to last 4KB (or start if file smaller)
+        if (file_size > SAMPLE_SIZE) {
+            fseek(file, -SAMPLE_SIZE, SEEK_END);
+            bytes_read = fread(buffer, 1, SAMPLE_SIZE, file);
+            if (bytes_read > 0) {
+                calculated_crc = esp_crc32_le(calculated_crc, buffer, bytes_read);
+            }
+        }
+    }
+
+    fclose(file);
+    *crc32 = calculated_crc ^ 0xFFFFFFFF; // Final XOR
+
+    return ESP_OK;
+}

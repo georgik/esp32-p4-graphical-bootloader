@@ -24,5 +24,6 @@ idf_component_register(
         fatfs                  # For SD card filesystem
         sdmmc                  # For SD card access
         spi_flash              # For direct flash access
+        nvs_flash              # For firmware configuration storage
         # esp_raylib_port is pulled in via georgik__raylib dependency
 )

@@ -10,6 +10,8 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_vfs_fat.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include <sys/stat.h>
 #include <dirent.h>
 #include <string.h>
@@ -29,6 +31,8 @@ static void fw_selector_select_all_cb(lv_event_t* e);
 static void fw_selector_clear_cb(lv_event_t* e);
 static void fw_selector_flash_cb(lv_event_t* e);
 static void fw_selector_back_cb(lv_event_t* e);
+static void fw_flash_progress_callback(uint32_t current_firmware, uint32_t total_firmwares,
+                                       uint32_t current_progress, uint32_t total_progress, const char* status_message);
 
 static void update_firmware_list_item(firmware_selector_t* selector, uint32_t index);
 static void update_buttons_state(firmware_selector_t* selector);
@@ -114,7 +118,16 @@ esp_err_t firmware_selector_scan_directory(firmware_selector_t* selector)
             fw->size = st.st_size;
             // Basic size check - mark as potentially valid if reasonable size
             fw->is_valid = (fw->size >= 1024 && fw->size <= 16 * 1024 * 1024); // 1KB to 16MB
-            fw->crc32 = 0; // Will calculate when actually needed
+
+            // Fast CRC32 calculation using first/last block sampling instead of full file
+            // This is much faster for large images and provides reasonable integrity checking
+            esp_err_t crc_ret = firmware_calculate_fast_crc32(fw->file_path, fw->size, &fw->crc32);
+            if (crc_ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to calculate fast CRC32 for %s, using 0", fw->filename);
+                fw->crc32 = 0;
+            } else {
+                ESP_LOGD(TAG, "Fast CRC32 calculated for %s: 0x%08X", fw->filename, fw->crc32);
+            }
         } else {
             ESP_LOGW(TAG, "Cannot get file size for: %s", fw->filename);
             fw->is_valid = false;
@@ -226,7 +239,7 @@ static void fw_selector_flash_cb(lv_event_t* e)
         flash_config.enable_verification = true;
         flash_config.enable_optimized_chunking = true;
         flash_config.chunk_size = 0;  // Auto-detect
-        flash_config.progress_callback = NULL;  // Use default progress handling
+        flash_config.progress_callback = fw_flash_progress_callback;  // LVGL progress updates
         flash_config.status_callback = NULL;   // Use default status handling
 
         // Start flashing
@@ -237,6 +250,33 @@ static void fw_selector_flash_cb(lv_event_t* e)
         }
 
         ESP_LOGI(TAG, "Firmware flashing operation started");
+    }
+}
+
+// LVGL progress callback for firmware flashing
+static void fw_flash_progress_callback(uint32_t current_firmware, uint32_t total_firmwares,
+                                   uint32_t current_progress, uint32_t total_progress, const char* status_message)
+{
+    ESP_LOGD(TAG, "Flash Progress: %lu/%lu, %lu%% - %s",
+             (unsigned long)current_firmware, (unsigned long)total_firmwares,
+             (unsigned long)current_progress, status_message);
+
+    // Update LVGL progress bar on screen
+    if (total_progress > 0) {
+        uint8_t percentage = (uint8_t)((current_progress * 100) / total_progress);
+        update_progress_bar(percentage);
+    }
+
+    // Update status message
+    if (status_message) {
+        char full_status[256];
+        if (total_firmwares > 1) {
+            snprintf(full_status, sizeof(full_status), "Flashing %lu/%lu: %s",
+                     (unsigned long)current_firmware, (unsigned long)total_firmwares, status_message);
+        } else {
+            snprintf(full_status, sizeof(full_status), "%s", status_message);
+        }
+        update_status(full_status);
     }
 }
 
@@ -624,4 +664,118 @@ esp_err_t firmware_selector_cleanup(firmware_selector_t* selector)
     memset(selector, 0, sizeof(firmware_selector_t));
 
     return ESP_OK;
+}
+
+esp_err_t firmware_selector_store_firmware_config(firmware_selector_t* selector)
+{
+    if (!selector) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Storing firmware configuration in NVS for boot menu");
+
+    // Initialize NVS system first (in case not already initialized)
+    esp_err_t nvs_init_err = nvs_flash_init();
+    if (nvs_init_err != ESP_OK && nvs_init_err != ESP_ERR_NVS_NO_FREE_PAGES && nvs_init_err != ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGE(TAG, "Error initializing NVS flash: %s", esp_err_to_name(nvs_init_err));
+        return nvs_init_err;
+    }
+
+    // Open NVS namespace
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open("firmware_config", NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error opening NVS namespace: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // Get selected firmwares
+    firmware_info_t* selected_firmware[MAX_FIRMWARE_COUNT];
+    uint32_t selected_count = 0;
+    err = firmware_selector_get_selected(selector, selected_firmware, MAX_FIRMWARE_COUNT, &selected_count);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get selected firmware: %s", esp_err_to_name(err));
+        nvs_close(nvs_handle);
+        return err;
+    }
+
+    // Clear existing firmware entries
+    err = nvs_erase_all(nvs_handle);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "Failed to erase NVS entries: %s", esp_err_to_name(err));
+    }
+
+    // Store each selected firmware
+    char key[32];
+    char value[256];
+    for (uint32_t i = 0; i < selected_count; i++) {
+        firmware_info_t* firmware = selected_firmware[i];
+
+        if (!firmware->assigned_partition) {
+            ESP_LOGW(TAG, "Skipping firmware %s - no assigned partition", firmware->display_name);
+            continue;
+        }
+
+        partition_info_t* partition = (partition_info_t*)firmware->assigned_partition;
+
+        // Store filename
+        snprintf(key, sizeof(key), "fw_%d_filename", (int)i);
+        err = nvs_set_str(nvs_handle, key, firmware->display_name);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to store filename for firmware %d: %s", (int)i, esp_err_to_name(err));
+            continue;
+        }
+
+        // Store OTA partition name
+        snprintf(key, sizeof(key), "fw_%d_partition", (int)i);
+        err = nvs_set_str(nvs_handle, key, partition->name);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to store partition for firmware %d: %s", (int)i, esp_err_to_name(err));
+            continue;
+        }
+
+        // Store OTA partition offset
+        snprintf(key, sizeof(key), "fw_%d_offset", (int)i);
+        err = nvs_set_u32(nvs_handle, key, partition->offset);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to store offset for firmware %d: %s", (int)i, esp_err_to_name(err));
+            continue;
+        }
+
+        // Store firmware size
+        snprintf(key, sizeof(key), "fw_%d_size", (int)i);
+        err = nvs_set_u32(nvs_handle, key, firmware->size);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to store size for firmware %d: %s", (int)i, esp_err_to_name(err));
+            continue;
+        }
+
+        // Store CRC32 for integrity checking
+        snprintf(key, sizeof(key), "fw_%d_crc32", (int)i);
+        err = nvs_set_u32(nvs_handle, key, firmware->crc32);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to store CRC32 for firmware %d: %s", (int)i, esp_err_to_name(err));
+            continue;
+        }
+
+        ESP_LOGI(TAG, "Stored firmware %d: %s -> %s (0x%08x, %d bytes, CRC32: 0x%08X)",
+                 (int)i, firmware->display_name, partition->name, partition->offset, firmware->size, firmware->crc32);
+    }
+
+    // Store firmware count
+    err = nvs_set_u32(nvs_handle, "firmware_count", selected_count);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to store firmware count: %s", esp_err_to_name(err));
+    }
+
+    // Commit changes
+    err = nvs_commit(nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to commit NVS changes: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Successfully stored %d firmware(s) in NVS", (int)selected_count);
+    }
+
+    nvs_close(nvs_handle);
+    return err;
 }

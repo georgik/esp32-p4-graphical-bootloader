@@ -182,6 +182,17 @@ firmware_info_t* firmware_selector_get_firmware(firmware_selector_t* selector, u
  */
 esp_err_t firmware_selector_update_size_display(firmware_selector_t* selector);
 
+/**
+ * @brief Store firmware configuration in NVS for boot menu
+ *
+ * Stores information about flashed firmware (filename, OTA partition) in NVS
+ * so that the boot menu can display available applications and allow booting them.
+ *
+ * @param selector Firmware selector with selected firmware
+ * @return esp_err_t ESP_OK on success, error code otherwise
+ */
+esp_err_t firmware_selector_store_firmware_config(firmware_selector_t* selector);
+
 #ifdef __cplusplus
 }
 #endif

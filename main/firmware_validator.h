@@ -49,6 +49,19 @@ typedef struct {
 esp_err_t firmware_validate(const char* file_path, firmware_validation_result_t* result);
 
 /**
+ * @brief Fast CRC32 calculation using first/last block sampling
+ *
+ * Calculates CRC32 by sampling first 4KB and last 4KB of the file.
+ * Much faster than full file calculation for large images.
+ *
+ * @param file_path Path to firmware file
+ * @param file_size Size of the firmware file
+ * @param crc32 Pointer to store calculated CRC32
+ * @return esp_err_t ESP_OK on success, error code otherwise
+ */
+esp_err_t firmware_calculate_fast_crc32(const char* file_path, uint32_t file_size, uint32_t* crc32);
+
+/**
  * @brief Calculate CRC32 of a file
  *
  * @param file_path Path to file

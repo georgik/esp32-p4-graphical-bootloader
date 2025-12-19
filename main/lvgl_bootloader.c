@@ -79,29 +79,30 @@ static void demo_btn_event_cb(lv_event_t *e)
     lv_obj_t *btn = lv_event_get_target(e);
     uint32_t btn_id = (uint32_t)lv_obj_get_user_data(btn);
 
-    ESP_LOGI(TAG, "Demo button %lu pressed", btn_id);
+    ESP_LOGI(TAG, "Main button %lu pressed", btn_id);
 
     switch(btn_id) {
         case 0:
-            // Demo 1: SD Card OTA
-            ESP_LOGI(TAG, "Starting SD Card OTA...");
-            sd_ota_start();
-            break;
-
-        case 1:
-            // Demo 2: Another application
-            switch_screen(SCREEN_DEMO);
-            break;
-
-        case 2:
-            // Demo 3: Another application
-            switch_screen(SCREEN_DEMO);
-            break;
-
-        case 3:
             // Select & Flash Firmware
             ESP_LOGI(TAG, "Opening firmware selector...");
             show_firmware_selector_screen();
+            break;
+
+        case 1:
+            // Boot Menu - Show flashed applications
+            ESP_LOGI(TAG, "Opening boot menu...");
+            switch_screen(SCREEN_SETTINGS);  // Reuse settings screen for boot menu
+            break;
+
+        case 2:
+            // Settings
+            switch_screen(SCREEN_SETTINGS);
+            break;
+
+        case 3:
+            // Reboot to run application
+            ESP_LOGI(TAG, "Rebooting system...");
+            esp_restart();
             break;
     }
 }
