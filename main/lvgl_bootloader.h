@@ -92,6 +92,14 @@ void set_ota_in_progress(bool in_progress);
 bool is_ota_in_progress(void);
 
 /**
+ * @brief Refresh the main screen to reload applications list
+ *
+ * Destroys and recreates the main screen to refresh the applications
+ * list from NVS. Useful after flashing new firmware.
+ */
+void refresh_main_screen(void);
+
+/**
  * @brief Initialize firmware selector screen
  *
  * Initializes the firmware selector and scans for firmware files.

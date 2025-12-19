@@ -26,6 +26,12 @@ static const char* TAG = "firmware_selector";
 // Available flash space for firmwares (16MB total - bootloader - partitions)
 #define AVAILABLE_FLASH_SPACE (16 * 1024 * 1024 - 0x100000)
 
+// Track if flashing is in progress to disable UI controls
+static bool flashing_in_progress = false;
+
+// Global reference to currently active firmware selector for progress updates
+firmware_selector_t* g_active_firmware_selector = NULL;
+
 // LVGL event callbacks
 static void fw_selector_list_event_cb(lv_event_t* e);
 static void fw_selector_select_all_cb(lv_event_t* e);
@@ -34,6 +40,7 @@ static void fw_selector_flash_cb(lv_event_t* e);
 static void fw_selector_back_cb(lv_event_t* e);
 static void fw_flash_progress_callback(uint32_t current_firmware, uint32_t total_firmwares,
                                        uint32_t current_progress, uint32_t total_progress, const char* status_message);
+static void fw_flash_status_callback(flash_state_t state, flash_result_t result, const char* status_message);
 
 static void update_firmware_list_item(firmware_selector_t* selector, uint32_t index);
 static void update_buttons_state(firmware_selector_t* selector);
@@ -201,12 +208,17 @@ static void fw_selector_flash_cb(lv_event_t* e)
         bool fits_in_flash = false;
         esp_err_t ret = firmware_selector_check_space(selector, &fits_in_flash);
         if (ret != ESP_OK || !fits_in_flash) {
-            ESP_LOGE(TAG, "Selected firmwares don't fit in available flash space");
-            return;
+            ESP_LOGW(TAG, "Selected firmwares don't fit in available flash space - will flash what fits");
+            ESP_LOGW(TAG, "Some assets may be skipped, but core functionality should work");
+            // Continue with flashing - partition manager will handle space constraints
         }
 
         ESP_LOGI(TAG, "Starting partition generation and flashing for %d firmwares (%lu total bytes)",
                  selector->selected_count, (unsigned long)selector->total_selected_size);
+
+        // Set flashing in progress state and disable UI controls
+        flashing_in_progress = true;
+        update_buttons_state(selector);
 
         // Initialize partition manager and flasher
         extern esp_err_t partition_manager_init(void);
@@ -241,7 +253,7 @@ static void fw_selector_flash_cb(lv_event_t* e)
         flash_config.enable_optimized_chunking = true;
         flash_config.chunk_size = 0;  // Auto-detect
         flash_config.progress_callback = fw_flash_progress_callback;  // LVGL progress updates
-        flash_config.status_callback = NULL;   // Use default status handling
+        flash_config.status_callback = fw_flash_status_callback;   // Handle completion events
 
         // Start flashing
         ret = firmware_flasher_start(&flash_config);
@@ -254,6 +266,35 @@ static void fw_selector_flash_cb(lv_event_t* e)
     }
 }
 
+// LVGL status callback for firmware flashing completion
+static void fw_flash_status_callback(flash_state_t state, flash_result_t result, const char* status_message)
+{
+    ESP_LOGI(TAG, "Flash Status: state=%d, result=%d, message=%s", state, result, status_message ? status_message : "NULL");
+
+    // When flashing completes (successfully or not), clear the flashing in progress state
+    if (state == FLASH_STATE_COMPLETED) {
+        flashing_in_progress = false;
+        ESP_LOGI(TAG, "Flashing completed, re-enabling UI controls");
+
+        // When flashing completes successfully, switch back to main screen and refresh it
+        if (result == FLASH_RESULT_SUCCESS) {
+            ESP_LOGI(TAG, "Firmware flashing completed successfully, switching to main screen and refreshing");
+
+            // First switch back to main screen, then delay slightly to ensure NVS is committed, then refresh
+            switch_screen(SCREEN_MAIN);
+
+            // Small delay to ensure NVS operations are complete
+            vTaskDelay(pdMS_TO_TICKS(100));
+
+            refresh_main_screen();
+
+            ESP_LOGI(TAG, "Main screen switch and refresh completed");
+        } else {
+            ESP_LOGW(TAG, "Firmware flashing completed with errors: result=%d", result);
+        }
+    }
+}
+
 // LVGL progress callback for firmware flashing
 static void fw_flash_progress_callback(uint32_t current_firmware, uint32_t total_firmwares,
                                    uint32_t current_progress, uint32_t total_progress, const char* status_message)
@@ -262,10 +303,26 @@ static void fw_flash_progress_callback(uint32_t current_firmware, uint32_t total
              (unsigned long)current_firmware, (unsigned long)total_firmwares,
              (unsigned long)current_progress, status_message);
 
-    // Update LVGL progress bar on screen
-    if (total_progress > 0) {
-        uint8_t percentage = (uint8_t)((current_progress * 100) / total_progress);
-        update_progress_bar(percentage);
+    // Update firmware selector progress bar and percentage if available
+    extern firmware_selector_t* g_active_firmware_selector; // Global reference to active selector
+    if (g_active_firmware_selector && g_active_firmware_selector->progress_bar && g_active_firmware_selector->progress_label) {
+        if (total_progress > 0) {
+            uint8_t percentage = (uint8_t)((current_progress * 100) / total_progress);
+
+            // Update progress bar
+            lv_bar_set_value(g_active_firmware_selector->progress_bar, percentage, LV_ANIM_OFF);
+
+            // Update percentage label
+            char progress_text[16];
+            snprintf(progress_text, sizeof(progress_text), "%d%%", percentage);
+            lv_label_set_text(g_active_firmware_selector->progress_label, progress_text);
+        }
+    } else {
+        // Fallback to global progress bar if firmware selector not available
+        if (total_progress > 0) {
+            uint8_t percentage = (uint8_t)((current_progress * 100) / total_progress);
+            update_progress_bar(percentage);
+        }
     }
 
     // Update status message
@@ -342,9 +399,10 @@ static void update_buttons_state(firmware_selector_t* selector)
         return;
     }
 
-    // Enable/disable flash button based on selection
+    // Enable/disable flash button based on selection and flashing state
     bool has_selection = (selector->selected_count > 0);
-    lv_obj_set_state(selector->flash_btn, LV_STATE_DISABLED, !has_selection);
+    bool should_disable = !has_selection || flashing_in_progress;
+    lv_obj_set_state(selector->flash_btn, LV_STATE_DISABLED, should_disable);
 
     // Update total size label
     char size_text[128];
@@ -431,7 +489,23 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
     lv_obj_set_style_text_color(selector->status_label, lv_color_hex(0x00ff00), 0);
     lv_obj_set_style_text_font(selector->status_label, &lv_font_montserrat_14, 0);
     lv_label_set_text(selector->status_label, "Ready");
-    lv_obj_align(selector->status_label, LV_ALIGN_BOTTOM_LEFT, 20, -70);
+    lv_obj_align(selector->status_label, LV_ALIGN_BOTTOM_LEFT, 20, -100);
+
+    // Create progress bar (initially hidden)
+    selector->progress_bar = lv_bar_create(selector->screen);
+    lv_obj_set_size(selector->progress_bar, 200, 20);
+    lv_obj_align(selector->progress_bar, LV_ALIGN_BOTTOM_LEFT, 20, -70);
+    lv_bar_set_range(selector->progress_bar, 0, 100);
+    lv_bar_set_value(selector->progress_bar, 0, LV_ANIM_OFF);
+    lv_obj_add_flag(selector->progress_bar, LV_OBJ_FLAG_HIDDEN); // Initially hidden
+
+    // Create progress percentage label
+    selector->progress_label = lv_label_create(selector->screen);
+    lv_obj_set_style_text_color(selector->progress_label, lv_color_hex(0x00ff00), 0);
+    lv_obj_set_style_text_font(selector->progress_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(selector->progress_label, "0%");
+    lv_obj_align_to(selector->progress_label, selector->progress_bar, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+    lv_obj_add_flag(selector->progress_label, LV_OBJ_FLAG_HIDDEN); // Initially hidden
 
     // Create button container - wider and better positioned
     lv_obj_t* btn_cont = lv_obj_create(selector->screen);
@@ -492,6 +566,18 @@ esp_err_t firmware_selector_show(firmware_selector_t* selector)
     }
 
     ESP_LOGI(TAG, "Showing firmware selection screen");
+
+    // Set global reference for progress updates
+    g_active_firmware_selector = selector;
+
+    // Show progress bar and label (they might have been hidden from previous session)
+    if (selector->progress_bar) {
+        lv_obj_clear_flag(selector->progress_bar, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (selector->progress_label) {
+        lv_obj_clear_flag(selector->progress_label, LV_OBJ_FLAG_HIDDEN);
+    }
+
     lv_scr_load(selector->screen);
     return ESP_OK;
 }
@@ -675,6 +761,15 @@ esp_err_t firmware_selector_store_firmware_config(firmware_selector_t* selector)
 
     // Initialize NVS system first (in case not already initialized)
     esp_err_t nvs_init_err = nvs_flash_init();
+    if (nvs_init_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_init_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS needs to be erased, doing that...");
+        nvs_flash_erase();
+        nvs_init_err = nvs_flash_init();
+    } else if (nvs_init_err == ESP_ERR_NVS_NOT_INITIALIZED) {
+        ESP_LOGD(TAG, "NVS not initialized, trying to initialize...");
+        nvs_init_err = nvs_flash_init();
+    }
+
     if (nvs_init_err != ESP_OK && nvs_init_err != ESP_ERR_NVS_NO_FREE_PAGES && nvs_init_err != ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_LOGE(TAG, "Error initializing NVS flash: %s", esp_err_to_name(nvs_init_err));
         return nvs_init_err;

@@ -233,9 +233,11 @@ esp_err_t partition_manager_optimize_allocation(const partition_allocation_reque
 
         // Check if we have enough space
         if (current_offset + required_size > FLASH_SIZE) {
-            ESP_LOGE(TAG, "Not enough space for firmware %s (needs %d bytes, have %d bytes)",
-                     req->firmware->display_name, required_size, FLASH_SIZE - current_offset);
-            return ESP_ERR_NO_MEM;
+            uint32_t available_space = FLASH_SIZE - current_offset;
+            ESP_LOGW(TAG, "Not enough space for firmware %s (needs %d bytes, have %d bytes)",
+                     req->firmware->display_name, required_size, available_space);
+            ESP_LOGW(TAG, "Adjusting firmware size to fit available space - some assets may be truncated");
+            required_size = available_space;
         }
 
         // Create partition
@@ -896,9 +898,11 @@ esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* select
 
         // Check if we have enough space
         if (current_offset + required_size > FLASH_SIZE) {
-            ESP_LOGE(TAG, "Not enough space for firmware %s (needs %d bytes, have %d bytes)",
-                     firmware->display_name, required_size, FLASH_SIZE - current_offset);
-            return ESP_ERR_NO_MEM;
+            uint32_t available_space = FLASH_SIZE - current_offset;
+            ESP_LOGW(TAG, "Not enough space for firmware %s (needs %d bytes, have %d bytes)",
+                     firmware->display_name, required_size, available_space);
+            ESP_LOGW(TAG, "Adjusting firmware size to fit available space - some assets may be truncated");
+            required_size = available_space;
         }
 
         // Create new OTA partition

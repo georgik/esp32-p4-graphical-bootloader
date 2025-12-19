@@ -36,6 +36,7 @@ static lv_obj_t *demo_btns[4] = {0};
 static lv_obj_t *status_label = NULL;
 static lv_obj_t *progress_bar = NULL;
 static lv_obj_t *progress_label = NULL;
+static lv_obj_t *app_cont = NULL;
 
 // Firmware selector
 static firmware_selector_t firmware_selector;
@@ -53,6 +54,9 @@ static lv_style_t style_status;
 
 // Progress tracking
 static bool ota_in_progress = false;
+
+// Forward declarations for callback functions
+static void boot_firmware_cb(lv_event_t *e);
 
 // Initialize display mutex
 static void init_display_mutex(void)
@@ -130,58 +134,132 @@ static void create_main_screen(void)
     // Create title - position higher and use smaller font
     title_label = lv_label_create(main_screen);
     lv_obj_add_style(title_label, &style_title, 0);
-    lv_label_set_text(title_label, "ESP32-P4 Multi-Firmware Bootloader");
+    lv_label_set_text(title_label, "Available Applications");
     lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 20);
 
-    // Create main buttons grid optimized for 1024x600 display
-    const char *button_names[] = {
-        "Select & Flash\nFirmware",
-        "Boot Menu\nApplications",
-        "Settings\n& Config",
-        "Reboot\nSystem"
-    };
+    // Create scrollable container for firmware applications list
+    app_cont = lv_obj_create(main_screen);
+    lv_obj_set_size(app_cont, 900, 450); // Large area for application list
+    lv_obj_align(app_cont, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_layout(app_cont, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(app_cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(app_cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    // Optimized button dimensions for 1024x600 screen
-    lv_coord_t btn_width = 220;  // Slightly wider
-    lv_coord_t btn_height = 120;  // Reduced height to prevent overflow
-    lv_coord_t btn_spacing = 30;  // Reduced spacing
+    // Small delay to ensure NVS is ready (especially after recent writes)
+    vTaskDelay(pdMS_TO_TICKS(50));
 
-    for (int i = 0; i < 4; i++) {
-        demo_btns[i] = lv_btn_create(main_screen);
-        lv_obj_add_style(demo_btns[i], &style_btn, 0);
-        lv_obj_add_style(demo_btns[i], &style_btn_pressed, LV_STATE_PRESSED);
-        lv_obj_set_size(demo_btns[i], btn_width, btn_height);
+    // Read firmware configuration from NVS and create boot buttons
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open("firmware_config", NVS_READONLY, &nvs_handle);
+    ESP_LOGI(TAG, "create_main_screen: NVS open result: %s", esp_err_to_name(err));
 
-        // Position in 2x2 grid centered vertically on screen
-        int row = i / 2;
-        int col = i % 2;
-        lv_coord_t x = (col == 0) ? -btn_width/2 - btn_spacing/2 : btn_width/2 + btn_spacing/2;
+    if (err == ESP_OK) {
+        uint32_t firmware_count = 0;
+        err = nvs_get_u32(nvs_handle, "firmware_count", &firmware_count);
+        ESP_LOGI(TAG, "create_main_screen: NVS firmware_count read result: %s, count: %lu", esp_err_to_name(err), (unsigned long)firmware_count);
 
-        // Calculate vertical centering for the button grid
-        lv_coord_t total_grid_height = 2 * btn_height + btn_spacing; // Height of both rows + spacing
-        lv_coord_t grid_start_y = -total_grid_height / 2 + btn_height / 2; // Start from center
-        lv_coord_t y = grid_start_y + row * (btn_height + btn_spacing);
+        if (err == ESP_OK && firmware_count > 0) {
+            ESP_LOGI(TAG, "Found %lu firmware(s) in NVS", (unsigned long)firmware_count);
 
-        lv_obj_align(demo_btns[i], LV_ALIGN_CENTER, x, y);
+            for (uint32_t i = 0; i < firmware_count; i++) {
+                char key[32];
+                char filename[128];
+                char partition_name[32];
+                uint32_t offset, size, crc32;
 
-        // Create label for button with larger font
-        lv_obj_t *label = lv_label_create(demo_btns[i]);
-        lv_label_set_text(label, button_names[i]);
-        lv_obj_center(label);
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+                // Read firmware data from NVS
+                snprintf(key, sizeof(key), "fw_%lu_filename", (unsigned long)i);
+                size_t filename_len = sizeof(filename);
+                if (nvs_get_str(nvs_handle, key, filename, &filename_len) != ESP_OK) {
+                    continue;
+                }
 
-        // Store button ID and add callback
-        lv_obj_set_user_data(demo_btns[i], (void*)(uintptr_t)i);
-        lv_obj_add_event_cb(demo_btns[i], demo_btn_event_cb, LV_EVENT_CLICKED, NULL);
+                snprintf(key, sizeof(key), "fw_%lu_partition", (unsigned long)i);
+                size_t partition_len = sizeof(partition_name);
+                if (nvs_get_str(nvs_handle, key, partition_name, &partition_len) != ESP_OK) {
+                    continue;
+                }
+
+                snprintf(key, sizeof(key), "fw_%lu_offset", (unsigned long)i);
+                if (nvs_get_u32(nvs_handle, key, &offset) != ESP_OK) {
+                    continue;
+                }
+
+                snprintf(key, sizeof(key), "fw_%lu_size", (unsigned long)i);
+                if (nvs_get_u32(nvs_handle, key, &size) != ESP_OK) {
+                    continue;
+                }
+
+                snprintf(key, sizeof(key), "fw_%lu_crc32", (unsigned long)i);
+                if (nvs_get_u32(nvs_handle, key, &crc32) != ESP_OK) {
+                    continue;
+                }
+
+                // Create boot button for this firmware
+                lv_obj_t *btn = lv_btn_create(app_cont);
+                lv_obj_add_style(btn, &style_btn, 0);
+                lv_obj_add_style(btn, &style_btn_pressed, LV_STATE_PRESSED);
+                lv_obj_set_size(btn, 800, 80);
+
+                // Store partition name for boot callback
+                char *stored_partition = malloc(strlen(partition_name) + 1);
+                strcpy(stored_partition, partition_name);
+                lv_obj_set_user_data(btn, stored_partition);
+
+                // Create button label with firmware info
+                char btn_text[256];
+                char size_str[32];
+                firmware_format_size(size, size_str, sizeof(size_str));
+                snprintf(btn_text, sizeof(btn_text), "%s\n%s (%s, CRC: 0x%08lX)",
+                         filename, partition_name, size_str, (unsigned long)crc32);
+
+                lv_obj_t *label = lv_label_create(btn);
+                lv_label_set_text(label, btn_text);
+                lv_obj_center(label);
+                lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
+
+                lv_obj_add_event_cb(btn, boot_firmware_cb, LV_EVENT_CLICKED, NULL);
+
+                ESP_LOGI(TAG, "Created boot button for %s -> %s", filename, partition_name);
+            }
+        } else {
+            ESP_LOGI(TAG, "No firmware found in NVS");
+            lv_obj_t *no_fw_label = lv_label_create(app_cont);
+            lv_label_set_text(no_fw_label, "No applications found.\nLoad firmware from SD card first.");
+            lv_obj_set_style_text_align(no_fw_label, LV_TEXT_ALIGN_CENTER, 0);
+        }
+
+        nvs_close(nvs_handle);
+    } else {
+        ESP_LOGE(TAG, "create_main_screen: Failed to open NVS: %s", esp_err_to_name(err));
+        lv_obj_t *error_label = lv_label_create(app_cont);
+        lv_label_set_text(error_label, "No application on flash,\nclick Load from SD Card.");
+        lv_obj_set_style_text_align(error_label, LV_TEXT_ALIGN_CENTER, 0);
     }
+
+    // Create "Load from SD Card" button in lower right corner (smaller)
+    demo_btns[0] = lv_btn_create(main_screen);
+    lv_obj_add_style(demo_btns[0], &style_btn, 0);
+    lv_obj_add_style(demo_btns[0], &style_btn_pressed, LV_STATE_PRESSED);
+    lv_obj_set_size(demo_btns[0], 180, 50);  // Smaller button
+    lv_obj_align(demo_btns[0], LV_ALIGN_BOTTOM_RIGHT, -20, -20);
+
+    lv_obj_t *load_label = lv_label_create(demo_btns[0]);
+    lv_label_set_text(load_label, "Load from SD Card");
+    lv_obj_center(load_label);
+    lv_obj_set_style_text_font(load_label, &lv_font_montserrat_12, 0);
+
+    // Store button ID and add callback for firmware selector
+    lv_obj_set_user_data(demo_btns[0], (void*)(uintptr_t)0);
+    lv_obj_add_event_cb(demo_btns[0], demo_btn_event_cb, LV_EVENT_CLICKED, NULL);
 
     // Create status label at bottom with more space
     status_label = lv_label_create(main_screen);
     lv_obj_add_style(status_label, &style_status, 0);
-    lv_label_set_text(status_label, "Select an option to continue");
-    lv_obj_align(status_label, LV_ALIGN_BOTTOM_MID, 0, -30);
+    lv_label_set_text(status_label, "Select application to boot");
+    lv_obj_align(status_label, LV_ALIGN_BOTTOM_MID, 0, -50);
 
-    ESP_LOGI(TAG, "Main screen created for 1024x600 display");
+    ESP_LOGI(TAG, "Main screen created with applications list for 1024x600 display");
 }
 
 static void create_demo_screen(void)
@@ -396,6 +474,49 @@ void switch_screen(screen_id_t screen_id)
     lv_screen_load(screens[screen_id]);
     current_screen = screen_id;
     ESP_LOGI(TAG, "Switched to screen %d", screen_id);
+}
+
+void refresh_main_screen(void)
+{
+    ESP_LOGI(TAG, "Refreshing main screen to reload applications list...");
+
+    if (!main_screen || !screens[SCREEN_MAIN]) {
+        ESP_LOGE(TAG, "Main screen not initialized, cannot refresh");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Destroying existing main screen elements...");
+
+    // Clear and destroy existing main screen elements
+    if (app_cont) {
+        lv_obj_del(app_cont);
+        app_cont = NULL;
+    }
+
+    if (demo_btns[0]) {
+        lv_obj_del(demo_btns[0]);
+        demo_btns[0] = NULL;
+    }
+
+    if (title_label) {
+        lv_obj_del(title_label);
+        title_label = NULL;
+    }
+
+    if (status_label) {
+        lv_obj_del(status_label);
+        status_label = NULL;
+    }
+
+    // Clear all button references
+    for (int i = 0; i < 4; i++) {
+        demo_btns[i] = NULL;
+    }
+
+    // Recreate the main screen
+    create_main_screen();
+
+    ESP_LOGI(TAG, "Main screen refreshed successfully");
 }
 
 // Progress bar for OTA operations
