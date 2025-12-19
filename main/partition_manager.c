@@ -38,11 +38,11 @@ static const char* TAG = "partition_manager";
 // ESP32-P4 System partition definitions - from esp32-image-composer-rs
 // Note: factory_app is NOT included here because it's an OTA partition that should be managed
 static const partition_info_t system_partitions[] = {
-    {"bootloader",     PARTITION_TYPE_BOOTLOADER,      0,                     BOOTLOADER_OFFSET,      BOOTLOADER_SIZE,              false, true,  false, NULL},
-    {"partition-table",PARTITION_TYPE_PARTITION_TABLE, 0,                     PARTITION_TABLE_OFFSET,  PARTITION_TABLE_SIZE,          false, true,  false, NULL},
-    {"nvs",           PARTITION_TYPE_NVS,             PARTITION_SUBTYPE_DATA_NVS,  NVS_OFFSET,             FIRMWARE_REGISTRY_SIZE,      false, false, false, NULL},
-    {"firmware-reg",  PARTITION_TYPE_FIRMWARE_REGISTRY,0,                     FIRMWARE_REGISTRY_OFFSET, FIRMWARE_REGISTRY_SIZE,        false, false, false, NULL},
-    {"ota_data",      PARTITION_TYPE_OTA_DATA,       ESP_PARTITION_SUBTYPE_DATA_OTA, OTA_DATA_OFFSET,        OTA_DATA_SIZE,               false, false, false, NULL},
+    {"bootloader",     PARTITION_TYPE_BOOTLOADER,      0,                     BOOTLOADER_OFFSET,      BOOTLOADER_SIZE,      0,      false, true,  false, NULL},
+    {"partition-table",PARTITION_TYPE_PARTITION_TABLE, 0,                     PARTITION_TABLE_OFFSET,  PARTITION_TABLE_SIZE,  0,      false, true,  false, NULL},
+    {"nvs",           PARTITION_TYPE_NVS,             PARTITION_SUBTYPE_DATA_NVS,  NVS_OFFSET,             FIRMWARE_REGISTRY_SIZE, 0,      false, false, false, NULL},
+    {"firmware-reg",  PARTITION_TYPE_FIRMWARE_REGISTRY,0,                     FIRMWARE_REGISTRY_OFFSET, FIRMWARE_REGISTRY_SIZE, 0,      false, false, false, NULL},
+    {"ota_data",      PARTITION_TYPE_OTA_DATA,       ESP_PARTITION_SUBTYPE_DATA_OTA, OTA_DATA_OFFSET,        OTA_DATA_SIZE,        0,      false, false, false, NULL},
 };
 static const uint32_t system_partition_count = sizeof(system_partitions) / sizeof(system_partitions[0]);
 
@@ -240,14 +240,14 @@ esp_err_t partition_manager_optimize_allocation(const partition_allocation_reque
             ESP_LOGW(TAG, "Firmware %s too large for available space", req->firmware->display_name);
             ESP_LOGW(TAG, "Original size: %d bytes, available: %d bytes, truncating to %d bytes",
                      original_size, available_space, required_size);
-
-            // Update the firmware info size to reflect truncation
-            req->firmware->size = required_size;
         }
 
         // Create partition
         partition_info_t* partition = &layout->partitions[layout->partition_count];
         memset(partition, 0, sizeof(partition_info_t));
+
+        // Initialize truncated size (set if we're truncating)
+        partition->truncated_size = (current_offset + required_size > FLASH_SIZE) ? required_size : 0;
 
         // Set partition name
         snprintf(partition->name, sizeof(partition->name), "ota_%" PRIu32, ota_slot_index);
@@ -910,14 +910,14 @@ esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* select
             ESP_LOGW(TAG, "Firmware %s too large for available space", firmware->display_name);
             ESP_LOGW(TAG, "Original size: %d bytes, available: %d bytes, truncating to %d bytes",
                      original_size, available_space, required_size);
-
-            // Update the firmware info size to reflect truncation
-            firmware->size = required_size;
         }
 
         // Create new OTA partition
         partition_info_t* ota_partition = &layout->partitions[layout->partition_count];
         memset(ota_partition, 0, sizeof(partition_info_t));
+
+        // Initialize truncated size (set if we're truncating)
+        ota_partition->truncated_size = (current_offset + required_size > FLASH_SIZE) ? required_size : 0;
 
         // Set partition name and properties
         snprintf(ota_partition->name, sizeof(ota_partition->name), "ota_%" PRIu32, i);

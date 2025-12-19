@@ -353,7 +353,7 @@ static void fw_flash_status_callback(flash_state_t state, flash_result_t result,
                 ESP_LOGI(TAG, "Forcing NVS data reload...");
                 esp_err_t nvs_err = nvs_flash_deinit();
                 if (nvs_err == ESP_OK) {
-                    vTaskDelay(pdMS_TO_TICKS(50)); // Small delay
+                    vTaskDelay(pdMS_TO_TICKS(100)); // Slightly longer delay to ensure all writes complete
                     nvs_err = nvs_flash_init();
                     if (nvs_err != ESP_OK) {
                         ESP_LOGW(TAG, "Failed to reinitialize NVS: %s", esp_err_to_name(nvs_err));

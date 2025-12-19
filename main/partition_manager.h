@@ -76,6 +76,7 @@ typedef struct {
     uint32_t subtype;
     uint32_t offset;
     uint32_t size;
+    uint32_t truncated_size;  // Size after truncation (0 if not truncated)
     bool is_ota;
     bool is_readonly;
     bool is_encrypted;

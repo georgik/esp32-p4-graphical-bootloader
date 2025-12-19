@@ -501,19 +501,32 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
     ESP_LOGI(TAG, "Flashing %d bytes in %d byte chunks (original file size: %ld)", total_bytes, chunk_size, file_size);
 
     // Debug: Check original file header before flashing
-    uint8_t original_header[32];
+    uint8_t header_buffer[32];
     fseek(file, 0, SEEK_SET);
-    size_t header_read = fread(original_header, 1, sizeof(original_header), file);
+    size_t header_read = fread(header_buffer, 1, sizeof(header_buffer), file);
     fseek(file, 0, SEEK_SET);
-    if (header_read == sizeof(original_header)) {
+    if (header_read == sizeof(header_buffer)) {
         ESP_LOGI(TAG, "Original file header (first 32 bytes):");
-        ESP_LOG_BUFFER_HEX(TAG, original_header, 32);
+        ESP_LOG_BUFFER_HEX(TAG, header_buffer, 32);
 
         // Check ESP32 image magic byte in original file
-        uint32_t orig_magic = *(uint32_t*)original_header;
+        uint32_t orig_magic = *(uint32_t*)header_buffer;
         ESP_LOGI(TAG, "Original file magic: 0x%08x (expected: 0xE9)", orig_magic);
 
-        if (orig_magic != 0xE9) {
+        // If we're truncating and this is a valid ESP32 image, we need to handle the checksum
+        if (orig_magic == 0xE9 && total_bytes < (uint32_t)file_size) {
+            ESP_LOGW(TAG, "Truncating ESP32 app image - removing checksum from header");
+
+            // ESP32 app image checksum is at offset 24 (4 bytes)
+            // Set it to 0 to indicate no checksum (bootloader will skip verification)
+            header_buffer[24] = 0x00;
+            header_buffer[25] = 0x00;
+            header_buffer[26] = 0x00;
+            header_buffer[27] = 0x00;
+
+            ESP_LOGI(TAG, "Updated header checksum to 0x00000000 for truncated image");
+            ESP_LOG_BUFFER_HEX(TAG, header_buffer, 32);
+        } else if (orig_magic != 0xE9) {
             ESP_LOGW(TAG, "WARNING: File does not appear to be a valid ESP32 app image!");
         }
     }
@@ -528,6 +541,23 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
         return ret;
     }
     ESP_LOGI(TAG, "OTA partition erased successfully");
+
+    // If we modified the header (for truncation), write it first
+    if (total_bytes < (uint32_t)file_size && header_read == sizeof(header_buffer)) {
+        ESP_LOGI(TAG, "Writing modified header with removed checksum");
+        ret = esp_flash_write(NULL, header_buffer, ota_partition->address, sizeof(header_buffer));
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to write modified header: %s", esp_err_to_name(ret));
+            free(buffer);
+            fclose(file);
+            return ret;
+        }
+        ESP_LOGI(TAG, "Modified header written successfully");
+
+        // Skip the header in the file since we already wrote it
+        fseek(file, sizeof(header_buffer), SEEK_SET);
+        bytes_flashed = sizeof(header_buffer);
+    }
 
     while (bytes_flashed < total_bytes && !g_abort_requested) {
         size_t bytes_to_read = chunk_size;
@@ -585,25 +615,25 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
              firmware->display_name, ota_partition->label, ota_partition->address);
 
     // Debug: Hexdump first 64 bytes of flashed data to check ESP32 image header
-    uint8_t header_buffer[64];
-    ret = esp_partition_read(ota_partition, 0, header_buffer, sizeof(header_buffer));
+    uint8_t flashed_header_buffer[64];
+    ret = esp_partition_read(ota_partition, 0, flashed_header_buffer, sizeof(flashed_header_buffer));
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "Flashed image header (first 32 bytes):");
-        ESP_LOG_BUFFER_HEX(TAG, header_buffer, 32);
+        ESP_LOG_BUFFER_HEX(TAG, flashed_header_buffer, 32);
 
         // Check ESP32 image magic byte
-        uint32_t magic = *(uint32_t*)header_buffer;
+        uint32_t magic = *(uint32_t*)flashed_header_buffer;
         ESP_LOGI(TAG, "Image magic: 0x%08x (expected: 0xE9)", magic);
 
         // Check image length
-        uint32_t image_len = *(uint32_t*)(header_buffer + 4);
+        uint32_t image_len = *(uint32_t*)(flashed_header_buffer + 4);
         ESP_LOGI(TAG, "Image length from header: %d bytes", image_len);
 
         // Check image CRC
-        uint32_t image_crc = *(uint8_t*)(header_buffer + 24) |
-                            (*(uint8_t*)(header_buffer + 25) << 8) |
-                            (*(uint8_t*)(header_buffer + 26) << 16) |
-                            (*(uint8_t*)(header_buffer + 27) << 24);
+        uint32_t image_crc = *(uint8_t*)(flashed_header_buffer + 24) |
+                            (*(uint8_t*)(flashed_header_buffer + 25) << 8) |
+                            (*(uint8_t*)(flashed_header_buffer + 26) << 16) |
+                            (*(uint8_t*)(flashed_header_buffer + 27) << 24);
         ESP_LOGI(TAG, "Image CRC from header: 0x%08x", image_crc);
     } else {
         ESP_LOGE(TAG, "Failed to read header for verification: %s", esp_err_to_name(ret));
