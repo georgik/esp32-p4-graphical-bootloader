@@ -226,6 +226,27 @@ static void flash_task(void* arg)
         return;
     }
 
+    // Assign OTA partitions back to firmware structures
+    ESP_LOGI(TAG, "Assigning OTA partitions to selected firmwares");
+    uint32_t assigned_count = 0;
+    for (uint32_t i = 0; i < partition_layout.partition_count; i++) {
+        const partition_info_t* part = &partition_layout.partitions[i];
+        if (part->is_ota && part->firmware != NULL) {
+            // Find the firmware in the selector and assign the partition
+            for (uint32_t j = 0; j < selected_count; j++) {
+                firmware_info_t* firmware = selected_firmware[j];
+                if (strcmp(firmware->display_name, part->firmware->display_name) == 0) {
+                    firmware->assigned_partition = (void*)part;  // Store partition info pointer
+                    ESP_LOGI(TAG, "Assigned partition %s (0x%08x, %d bytes) to firmware %s",
+                             part->name, part->offset, part->size, firmware->display_name);
+                    assigned_count++;
+                    break;
+                }
+            }
+        }
+    }
+    ESP_LOGI(TAG, "Assigned partitions to %d firmware(s)", assigned_count);
+
     // Validate generated partition layout
     bool layout_valid = false;
     ret = partition_manager_validate_layout(&partition_layout, &layout_valid);
@@ -355,22 +376,27 @@ static esp_err_t flash_firmware_list(void)
             return ESP_ERR_INVALID_STATE;
         }
 
-        // Find the newly created OTA partition by name and offset
-        esp_partition_info_t* assigned_part = (esp_partition_info_t*)firmware->assigned_partition;
-        const char* expected_label = (char*)assigned_part->label;
-        uint32_t expected_offset = assigned_part->pos.offset;
+        // Get partition information from assigned partition
+        partition_info_t* assigned_part = (partition_info_t*)firmware->assigned_partition;
+        const char* partition_name = assigned_part->name;
+        uint32_t expected_offset = assigned_part->offset;
+        uint32_t expected_size = assigned_part->size;
 
+        ESP_LOGI(TAG, "Flashing firmware %s to partition %s (0x%08x, %d bytes)",
+                 firmware->display_name, partition_name, expected_offset, expected_size);
+
+        // Find the newly created OTA partition by name and subtype
         const esp_partition_t* ota_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
                                                                         ESP_PARTITION_SUBTYPE_APP_OTA_0 + i,
-                                                                        expected_label);
+                                                                        partition_name);
 
         if (!ota_partition) {
-            ESP_LOGE(TAG, "Failed to find newly created OTA partition %s", expected_label);
+            ESP_LOGE(TAG, "Failed to find newly created OTA partition %s", partition_name);
             notify_status(g_flash_state, FLASH_RESULT_ERROR_PARTITION_TABLE, "New OTA partition not found");
             return ESP_ERR_NOT_FOUND;
         }
 
-        // Verify the partition has the correct offset
+        // Verify the partition has the correct offset and size
         if (ota_partition->address != expected_offset) {
             ESP_LOGE(TAG, "OTA partition offset mismatch: expected 0x%08x, found 0x%08x",
                      expected_offset, ota_partition->address);
