@@ -505,22 +505,8 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
             return ESP_ERR_INVALID_RESPONSE;
         }
 
-        // Use direct flash write with sector erase-on-demand
+        // Use direct flash write (ESP32 flash automatically erases on write)
         uint32_t flash_offset = ota_partition->address + bytes_flashed;
-        uint32_t sector_size = 4096;  // 4KB sectors for ESP32
-        uint32_t sector_start = (flash_offset / sector_size) * sector_size;
-        uint32_t sector_end = ((flash_offset + bytes_read + sector_size - 1) / sector_size) * sector_size;
-
-        // Erase only the sectors we need to write
-        ret = esp_flash_erase_region(NULL, sector_start, sector_end - sector_start);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to erase flash region 0x%08x: %s", sector_start, esp_err_to_name(ret));
-            free(buffer);
-            fclose(file);
-            return ret;
-        }
-
-        // Write to the erased region
         ret = esp_flash_write(NULL, buffer, flash_offset, bytes_read);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to write to flash at offset 0x%08x: %s",
