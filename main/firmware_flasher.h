@@ -240,6 +240,20 @@ esp_err_t firmware_flasher_flash_raw(const uint8_t* buffer,
                                        uint32_t offset,
                                        flash_progress_callback_t progress_callback);
 
+/**
+ * @brief Create OTA partition table from generated layout
+ *
+ * @param selector Firmware selector with selected firmwares
+ * @param buffer Buffer to store partition table data
+ * @param buffer_size Size of buffer
+ * @param actual_size Pointer to store actual size of partition table
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t firmware_flasher_create_ota_table_from_layout(const firmware_selector_t* selector,
+                                                          uint8_t* buffer,
+                                                          size_t buffer_size,
+                                                          size_t* actual_size);
+
 #ifdef __cplusplus
 }
 #endif

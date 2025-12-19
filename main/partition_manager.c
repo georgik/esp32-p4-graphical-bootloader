@@ -641,19 +641,10 @@ esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* select
         return ESP_OK;
     }
 
-    // Step 4: Find available space for new OTA partitions
-    // Find the highest offset among existing partitions
-    uint32_t highest_offset = 0;
-    for (uint32_t i = 0; i < layout->partition_count; i++) {
-        const partition_info_t* part = &layout->partitions[i];
-        uint32_t part_end = part->offset + part->size;
-        if (part_end > highest_offset) {
-            highest_offset = part_end;
-        }
-    }
-
-    // Align to 64KB boundary for OTA partitions
-    uint32_t current_offset = align_up(highest_offset, OTA_ALIGNMENT);
+    // Step 4: Start OTA partitions at fixed offset to match existing layout
+    // ESP32-P4 OTA partitions start at 0x330000 (from existing partition table)
+    const uint32_t OTA_START_OFFSET = 0x330000;
+    uint32_t current_offset = OTA_START_OFFSET;
 
     ESP_LOGI(TAG, "Starting OTA allocation at offset 0x%08x (after all existing partitions)", current_offset);
     ESP_LOGI(TAG, "Available space: %d bytes", FLASH_SIZE - current_offset);
