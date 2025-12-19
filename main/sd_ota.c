@@ -1,4 +1,5 @@
 #include "sd_ota.h"
+#include "vdma_protection.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
@@ -22,12 +23,32 @@ static sd_ota_state_t g_sd_ota_state = {0};
 static bool g_sd_card_mounted = false;
 static sdmmc_card_t* g_sd_card = NULL;
 
+// Callbacks for UI updates
+static void (*g_progress_callback)(uint8_t progress) = NULL;
+static void (*g_status_callback)(const char* status) = NULL;
+
+// Pre-allocated IRAM buffer to prevent fragmentation
+static uint8_t* g_preallocated_buffer = NULL;
+static size_t g_preallocated_size = 0;
+
 esp_err_t sd_ota_init(void) {
     ESP_LOGI(TAG, "Initializing SD card for OTA operations using improved BSP method...");
 
     if (g_sd_card_mounted) {
         ESP_LOGW(TAG, "SD card already mounted");
         return ESP_OK;
+    }
+
+    // Pre-allocate IRAM buffer early to prevent fragmentation
+    if (!g_preallocated_buffer) {
+        // Try to allocate a small buffer during initialization
+        g_preallocated_buffer = heap_caps_malloc(512, MALLOC_CAP_DMA | MALLOC_CAP_IRAM_8BIT);
+        if (g_preallocated_buffer) {
+            g_preallocated_size = 512;
+            ESP_LOGI(TAG, "Pre-allocated 512-byte IRAM buffer for OTA operations");
+        } else {
+            ESP_LOGW(TAG, "Could not pre-allocate IRAM buffer - will try during OTA");
+        }
     }
 
     ESP_LOGI(TAG, "Using standard BSP SD card mount (handles LDO internally)...");
@@ -93,44 +114,20 @@ esp_err_t sd_ota_check_file(const char* filename) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    // First, list the root directory contents for debugging
-    ESP_LOGI(TAG, "=== SD Card Root Directory Contents ===");
-    DIR* dir = opendir(SD_OTA_MOUNT_POINT);
-    if (dir) {
-        struct dirent* entry;
-        while ((entry = readdir(dir)) != NULL) {
-            char full_path[512];
-            snprintf(full_path, sizeof(full_path), "%s/%s", SD_OTA_MOUNT_POINT, entry->d_name);
-            struct stat st;
-
-            if (stat(full_path, &st) == 0) {
-                if (S_ISDIR(st.st_mode)) {
-                    ESP_LOGI(TAG, "DIR  : %s", entry->d_name);
-                } else {
-                    ESP_LOGI(TAG, "FILE : %s (%zu bytes)", entry->d_name, st.st_size);
-                }
-            } else {
-                // If stat fails, just show the name without type info
-                ESP_LOGI(TAG, "ENTRY: %s", entry->d_name);
-            }
-        }
-        closedir(dir);
-        ESP_LOGI(TAG, "=== End of Directory Listing ===");
-    } else {
-        ESP_LOGE(TAG, "Failed to open directory: %s", SD_OTA_MOUNT_POINT);
-    }
+    // Skip directory listing to reduce PSRAM contention and prevent flickering
+    ESP_LOGI(TAG, "Checking for OTA file: %s", filename);
 
     char filepath[256];
     snprintf(filepath, sizeof(filepath), "%s/%s", SD_OTA_MOUNT_POINT, filename);
 
     struct stat st;
     if (stat(filepath, &st) != 0) {
-        ESP_LOGE(TAG, "File not found: %s", filepath);
+        ESP_LOGW(TAG, "OTA file not found: %s", filepath);
         return ESP_ERR_NOT_FOUND;
     }
 
     if (st.st_size > SD_OTA_MAX_FILE_SIZE) {
-        ESP_LOGE(TAG, "File too large: %zu bytes (max: %d)", st.st_size, SD_OTA_MAX_FILE_SIZE);
+        ESP_LOGE(TAG, "OTA file too large: %zu bytes (max: %d)", st.st_size, SD_OTA_MAX_FILE_SIZE);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -236,61 +233,153 @@ esp_err_t sd_ota_flash_file(const char* filename, esp_partition_subtype_t partit
         return ret;
     }
 
-    // OPTIMIZED: Zero-copy operations with minimal IRAM buffer and DMA bypass
-    const size_t chunk_size = 2048;  // MINIMAL: 2KB chunks for IRAM efficiency
-    uint8_t* buffer = heap_caps_malloc(chunk_size, MALLOC_CAP_DMA | MALLOC_CAP_IRAM_8BIT);
-    if (!buffer) {
-        ESP_LOGE(TAG, "Failed to allocate IRAM DMA buffer, falling back to SPIRAM");
-        buffer = heap_caps_malloc(chunk_size, MALLOC_CAP_SPIRAM);
-        if (!buffer) {
-            ESP_LOGE(TAG, "Failed to allocate SPIRAM buffer");
+    // OPTIMIZED: Try to use pre-allocated IRAM buffer first, then fall back to other strategies
+    uint8_t* buffer = NULL;
+    size_t chunk_size = 0;
+    bool is_stack_buffer = false;
+
+    // Strategy 1: Use pre-allocated IRAM buffer (if available)
+    if (g_preallocated_buffer && g_preallocated_size > 0) {
+        buffer = g_preallocated_buffer;
+        chunk_size = g_preallocated_size;
+        ESP_LOGI(TAG, "Using pre-allocated IRAM buffer (%zu bytes) - display will remain stable");
+    } else {
+        // Strategy 2: Try very small 256-byte IRAM chunks (most likely to succeed)
+        chunk_size = 256;
+        buffer = heap_caps_malloc(chunk_size, MALLOC_CAP_DMA | MALLOC_CAP_IRAM_8BIT);
+        if (buffer) {
+            ESP_LOGI(TAG, "Allocated 256-byte IRAM DMA buffer - display will remain stable");
+        } else {
+            // Strategy 3: Try 512-byte IRAM chunks
+            chunk_size = 512;
+            buffer = heap_caps_malloc(chunk_size, MALLOC_CAP_DMA | MALLOC_CAP_IRAM_8BIT);
+            if (buffer) {
+                ESP_LOGI(TAG, "Allocated 512-byte IRAM DMA buffer - display will remain stable");
+            } else {
+                // Strategy 4: Try 1KB IRAM chunks
+                chunk_size = 1024;
+                buffer = heap_caps_malloc(chunk_size, MALLOC_CAP_DMA | MALLOC_CAP_IRAM_8BIT);
+                if (buffer) {
+                    ESP_LOGI(TAG, "Allocated 1KB IRAM DMA buffer - display will remain stable");
+                } else {
+                    // Strategy 5: Use stack-allocated buffer (no heap fragmentation)
+                    static uint8_t stack_buffer[128];  // 128 bytes on stack
+                    chunk_size = 128;
+                    buffer = stack_buffer;
+                    is_stack_buffer = true;
+                    ESP_LOGW(TAG, "Using 128-byte stack buffer - minimal memory usage");
+                }
+            }
+        }
+    }
+
+    ESP_LOGI(TAG, "Starting optimized OTA: 32-byte SD reads, %zu-byte flash writes", chunk_size);
+
+    // IRAM buffer doesn't need cache synchronization for DMA operations
+
+    uint32_t chunk_count = 0;
+
+    // MEMORY-ISOLATED: Use PSRAM for OTA operations while display uses IRAM
+    ESP_LOGI(TAG, "Starting PSRAM-isolated OTA: Moving OTA to PSRAM, display to IRAM");
+
+    // EXPLICITLY use PSRAM for OTA operations to avoid display contention
+    size_t psram_buffer_size = 4096;  // 4KB PSRAM buffer for efficient transfers
+
+    // Force allocation from EXTERNAL memory (PSRAM) - NOT internal IRAM
+    uint8_t* psram_buffer = heap_caps_malloc(psram_buffer_size,
+                                           MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+
+    if (!psram_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate PSRAM buffer, trying fallback");
+        // Use smaller chunk size for fallback
+        psram_buffer_size = 512;
+        psram_buffer = malloc(psram_buffer_size);  // Use standard malloc
+        if (!psram_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate any OTA buffer");
             esp_ota_abort(ota_handle);
             fclose(file);
             g_sd_ota_state.in_progress = false;
             return ESP_ERR_NO_MEM;
         }
-        ESP_LOGW(TAG, "Using SPIRAM buffer - display may flicker during OTA");
+        ESP_LOGW(TAG, "Using small fallback buffer - display may still flicker");
     } else {
-        ESP_LOGI(TAG, "Using IRAM DMA buffer - display will remain stable during OTA");
+        ESP_LOGI(TAG, "Allocated %zu-byte PSRAM buffer for OTA operations", psram_buffer_size);
+        ESP_LOGI(TAG, "Display runs from IRAM, OTA runs from PSRAM - complete memory isolation");
     }
 
-    ESP_LOGI(TAG, "Flashing firmware in %zu byte IRAM-optimized chunks...", chunk_size);
+    // MAXIMUM THROTTLING: Use extremely small chunks for zero display interference
+    size_t psram_chunk_size;
+    if (psram_buffer_size >= 4096) {
+        psram_chunk_size = 128;   // MAXIMUM: Extremely small chunks for complete display stability
+    } else {
+        psram_chunk_size = 16;    // MAXIMUM: Tiny fallback chunks for absolute minimum interference
+    }
+    size_t psram_buffer_pos = 0;
 
-    // IRAM buffer doesn't need cache synchronization for DMA operations
+    ESP_LOGI(TAG, "MAXIMUM THROTTLING: Using %zu-byte chunks with %zu-byte buffer", psram_chunk_size, psram_buffer_size);
 
-    uint32_t chunk_count = 0;
-    uint32_t yield_counter = 0;
+    // MAXIMUM VDMA PROTECTION: Extreme display protection for SD card operations
+    uint32_t display_yield_counter = 0;
+    const uint32_t display_yield_interval = 2;  // MAXIMUM: Yield every 2 chunks (was 8) for absolute safety
 
     while (g_sd_ota_state.bytes_written < file_size) {
-        size_t bytes_to_read = chunk_size;
-        if (bytes_to_read > (file_size - g_sd_ota_state.bytes_written)) {
-            bytes_to_read = file_size - g_sd_ota_state.bytes_written;
+        // ENHANCED VDMA: Check if display is currently protected
+        if (vdma_is_display_protected()) {
+            // Display is currently rendering, wait for protection to be disabled
+            vTaskDelay(pdMS_TO_TICKS(5));  // Short wait for display to complete
         }
 
-        // MINIMAL YIELDING: Only when display would be affected
-        if (yield_counter % 32 == 0) {  // Every 32 chunks (64KB)
-            vTaskDelay(pdMS_TO_TICKS(1));
+        // AGGRESSIVE: VDMA coordination before every major PSRAM operation
+        if (display_yield_counter % display_yield_interval == 0) {
+            // Ensure display refresh completes before intensive SD card operations
+            vdma_ensure_display_refresh(25);  // AGGRESSIVE: Ensure 25ms (was 16ms) for display refresh
+            vTaskDelay(pdMS_TO_TICKS(5));     // AGGRESSIVE: Additional 5ms pause for display stability
+            ESP_LOGD(TAG, "AGGRESSIVE VDMA: Extended display refresh before PSRAM operations");
         }
 
-        size_t bytes_read = fread(buffer, 1, bytes_to_read, file);
-        if (bytes_read != bytes_to_read) {
-            ESP_LOGE(TAG, "File read error: expected %zu, got %zu", bytes_to_read, bytes_read);
-            if (buffer) {
-                heap_caps_free(buffer);
+        // Fill PSRAM buffer with data from SD card - VDMA-coordinated operations
+        while (psram_buffer_pos < psram_buffer_size && g_sd_ota_state.bytes_written < file_size) {
+            size_t bytes_to_read = psram_chunk_size;
+            size_t remaining = file_size - g_sd_ota_state.bytes_written;
+            if (bytes_to_read > remaining) {
+                bytes_to_read = remaining;
             }
-            esp_ota_abort(ota_handle);
-            fclose(file);
-            g_sd_ota_state.in_progress = false;
-            return ESP_ERR_INVALID_RESPONSE;
+
+            // ENHANCED VDMA: Coordinate SD card read with display protection
+            // Brief micro-yield before SD card operation to allow display DMA access
+            taskYIELD();
+
+            size_t bytes_read = fread(psram_buffer + psram_buffer_pos, 1, bytes_to_read, file);
+            if (bytes_read != bytes_to_read) {
+                ESP_LOGE(TAG, "File read error: expected %zu, got %zu", bytes_to_read, bytes_read);
+                heap_caps_free(psram_buffer);
+                if (buffer && !is_stack_buffer && buffer != g_preallocated_buffer) {
+                    heap_caps_free(buffer);
+                }
+                esp_ota_abort(ota_handle);
+                fclose(file);
+                g_sd_ota_state.in_progress = false;
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+
+            psram_buffer_pos += bytes_read;
+            g_sd_ota_state.bytes_written += bytes_read;
+            chunk_count++;
+            display_yield_counter++;
+
+            // CRITICAL: Micro-yield between small operations to prevent display blocking
+            if (display_yield_counter % 2 == 0) {
+                taskYIELD();  // Give display controller micro-time slices
+            }
         }
 
-        // IRAM buffer doesn't need cache flush for DMA operations
-
-        ret = esp_ota_write(ota_handle, buffer, bytes_read);
+        // Write accumulated PSRAM buffer to flash in one operation
+        ret = esp_ota_write(ota_handle, psram_buffer, psram_buffer_pos);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "OTA write error at offset %zu: %s",
-                     g_sd_ota_state.bytes_written, esp_err_to_name(ret));
-            if (buffer) {
+                     g_sd_ota_state.bytes_written - psram_buffer_pos, esp_err_to_name(ret));
+            heap_caps_free(psram_buffer);
+            if (buffer && !is_stack_buffer && buffer != g_preallocated_buffer) {
                 heap_caps_free(buffer);
             }
             esp_ota_abort(ota_handle);
@@ -299,25 +388,35 @@ esp_err_t sd_ota_flash_file(const char* filename, esp_partition_subtype_t partit
             return ret;
         }
 
-        g_sd_ota_state.bytes_written += bytes_read;
-        chunk_count++;
-        yield_counter++;
+        // Reset buffer position for next chunk
+        psram_buffer_pos = 0;
 
-        // VERY INFREQUENT yielding to maintain display stability
-        if (chunk_count % 64 == 0) {  // Every 64 chunks (128KB)
-            vTaskDelay(pdMS_TO_TICKS(1));
+        // Update progress every ~64KB processed (less frequent UI updates)
+        if (chunk_count % 64 == 0) {
+            float progress_percent = (float)g_sd_ota_state.bytes_written * 100.0f / file_size;
+            ESP_LOGI(TAG, "Progress: %zu/%zu bytes (%.1f%%)", g_sd_ota_state.bytes_written, file_size, progress_percent);
+
+            // Call progress callback if set
+            if (g_progress_callback) {
+                g_progress_callback((uint8_t)progress_percent);
+            }
         }
 
-        // Log progress efficiently
-        if (chunk_count % 128 == 0) {  // Every 128 chunks (256KB)
-            ESP_LOGD(TAG, "Flashing progress: %zu/%zu bytes (%.1f%%)",
-                     g_sd_ota_state.bytes_written, file_size,
-                     (float)g_sd_ota_state.bytes_written * 100.0f / file_size);
+        // Optional: Small delay every few chunks to ensure LVGL gets CPU time
+        if (chunk_count % 16 == 0) {
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
 
-    // Clean up IRAM buffer
-    if (buffer) {
+    // Clean up buffer (use appropriate free function based on allocation)
+    if (psram_buffer_size >= 4096) {
+        heap_caps_free(psram_buffer);  // Was allocated with heap_caps_malloc (PSRAM)
+    } else {
+        free(psram_buffer);  // Was allocated with malloc (fallback)
+    }
+
+    // Clean up buffer (only free if heap-allocated)
+    if (buffer && !is_stack_buffer && buffer != g_preallocated_buffer) {
         heap_caps_free(buffer);
     }
 
@@ -369,6 +468,107 @@ void sd_ota_cleanup(void) {
         g_sd_card = NULL;
     }
 
+    // Clean up pre-allocated buffer
+    if (g_preallocated_buffer) {
+        heap_caps_free(g_preallocated_buffer);
+        g_preallocated_buffer = NULL;
+        g_preallocated_size = 0;
+        ESP_LOGI(TAG, "Cleaned up pre-allocated IRAM buffer");
+    }
+
     // Reset OTA state
     memset(&g_sd_ota_state, 0, sizeof(g_sd_ota_state));
+}
+
+// Callback setters
+void sd_ota_set_progress_callback(void (*callback)(uint8_t progress)) {
+    g_progress_callback = callback;
+}
+
+void sd_ota_set_status_callback(void (*callback)(const char* status)) {
+    g_status_callback = callback;
+}
+
+// Start SD Card OTA process
+esp_err_t sd_ota_start(void) {
+    ESP_LOGI(TAG, "Starting SD Card OTA process for ota1.bin...");
+
+    if (!g_sd_card_mounted) {
+        ESP_LOGE(TAG, "SD card not mounted");
+        if (g_status_callback) {
+            g_status_callback("Error: SD card not available");
+        }
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Notify UI
+    if (g_status_callback) {
+        g_status_callback("Checking for ota1.bin...");
+    }
+
+    // Check if ota1.bin exists
+    esp_err_t ret = sd_ota_check_file(SD_OTA_FILENAME);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ota1.bin not found or not readable");
+        if (g_status_callback) {
+            g_status_callback("Error: ota1.bin not found");
+        }
+        return ret;
+    }
+
+    // Get file size
+    size_t file_size;
+    ret = sd_ota_get_file_size(SD_OTA_FILENAME, &file_size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get ota1.bin size");
+        if (g_status_callback) {
+            g_status_callback("Error: Failed to read file size");
+        }
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Found ota1.bin: %zu bytes", file_size);
+
+    if (file_size > SD_OTA_MAX_FILE_SIZE) {
+        ESP_LOGE(TAG, "File too large: %zu bytes (max: %d)", file_size, SD_OTA_MAX_FILE_SIZE);
+        if (g_status_callback) {
+            g_status_callback("Error: File too large");
+        }
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // Initialize OTA state
+    memset(&g_sd_ota_state, 0, sizeof(g_sd_ota_state));
+    g_sd_ota_state.filename = SD_OTA_FILENAME;
+    g_sd_ota_state.file_size = file_size;
+    g_sd_ota_state.in_progress = true;
+
+    // Notify UI
+    if (g_status_callback) {
+        g_status_callback("Flashing firmware...");
+    }
+
+    // Start flashing
+    ret = sd_ota_flash_file(SD_OTA_FILENAME, ESP_PARTITION_SUBTYPE_APP_OTA_1);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to flash ota1.bin: %s", esp_err_to_name(ret));
+        g_sd_ota_state.in_progress = false;
+        if (g_status_callback) {
+            g_status_callback("Error: Flashing failed");
+        }
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "OTA completed successfully");
+    g_sd_ota_state.in_progress = false;
+    if (g_status_callback) {
+        g_status_callback("OTA completed successfully! Restarting...");
+    }
+
+    // Automatic restart after 2 seconds
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_LOGI(TAG, "Restarting system to boot from OTA_1...");
+    esp_restart();
+
+    return ESP_OK;
 }

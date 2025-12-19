@@ -1,15 +1,16 @@
 # Main graphical bootloader application
 idf_component_register(
     SRCS
-        "graphical_bootloader.c"
+        "main.c"
+        "lvgl_bootloader.c"
         "board_init.c"
         "sd_ota.c"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES
-        georgik__raylib
+        #georgik__raylib
         espressif__esp_lcd_touch
-        espressif__esp32_p4_function_ev_board_noglib
+        espressif__esp32_p4_function_ev_board
         esp_partition
         esp_timer
         esp_system

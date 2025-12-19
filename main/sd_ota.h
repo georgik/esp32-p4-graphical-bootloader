@@ -52,6 +52,24 @@ esp_err_t sd_ota_flash_file(const char* filename, esp_partition_subtype_t partit
 sd_ota_state_t sd_ota_get_state(void);
 
 /**
+ * @brief Start SD Card OTA process for ota1.bin
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t sd_ota_start(void);
+
+/**
+ * @brief Set progress callback for OTA operations
+ * @param callback Function to call with progress updates (0-100%)
+ */
+void sd_ota_set_progress_callback(void (*callback)(uint8_t progress));
+
+/**
+ * @brief Set status callback for OTA operations
+ * @param callback Function to call with status messages
+ */
+void sd_ota_set_status_callback(void (*callback)(const char* status));
+
+/**
  * @brief Cleanup SD card resources
  */
 void sd_ota_cleanup(void);
