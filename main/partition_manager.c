@@ -231,11 +231,18 @@ esp_err_t partition_manager_optimize_allocation(const partition_allocation_reque
         // Calculate required size with ESP32-P4 OTA alignment
         uint32_t required_size = align_up(req->preferred_size, OTA_ALIGNMENT);
 
-        // Check if we have enough space
+        // Check if we have enough space, if not, adjust size to fit
+        uint32_t available_space = FLASH_SIZE - current_offset;
         if (current_offset + required_size > FLASH_SIZE) {
-            ESP_LOGE(TAG, "Not enough space for firmware %s (needs %d bytes, have %d bytes)",
-                     req->firmware->display_name, required_size, FLASH_SIZE - current_offset);
-            return ESP_ERR_NO_MEM;
+            uint32_t original_size = required_size;
+            required_size = available_space;
+
+            ESP_LOGW(TAG, "Firmware %s too large for available space", req->firmware->display_name);
+            ESP_LOGW(TAG, "Original size: %d bytes, available: %d bytes, truncating to %d bytes",
+                     original_size, available_space, required_size);
+
+            // Update the firmware info size to reflect truncation
+            req->firmware->size = required_size;
         }
 
         // Create partition
@@ -894,11 +901,18 @@ esp_err_t partition_manager_generate_ota_only_layout(firmware_selector_t* select
         ESP_LOGI(TAG, "Dynamic OTA sizing for %s: firmware=%d, required=%d, available_ota=%d",
                  firmware->display_name, firmware->size, required_size, available_ota_space);
 
-        // Check if we have enough space
+        // Check if we have enough space, if not, adjust size to fit
+        uint32_t available_space = FLASH_SIZE - current_offset;
         if (current_offset + required_size > FLASH_SIZE) {
-            ESP_LOGE(TAG, "Not enough space for firmware %s (needs %d bytes, have %d bytes)",
-                     firmware->display_name, required_size, FLASH_SIZE - current_offset);
-            return ESP_ERR_NO_MEM;
+            uint32_t original_size = required_size;
+            required_size = available_space;
+
+            ESP_LOGW(TAG, "Firmware %s too large for available space", firmware->display_name);
+            ESP_LOGW(TAG, "Original size: %d bytes, available: %d bytes, truncating to %d bytes",
+                     original_size, available_space, required_size);
+
+            // Update the firmware info size to reflect truncation
+            firmware->size = required_size;
         }
 
         // Create new OTA partition

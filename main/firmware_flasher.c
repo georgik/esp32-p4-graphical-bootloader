@@ -488,9 +488,17 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
     }
 
     uint32_t bytes_flashed = 0;
-    uint32_t total_bytes = file_size;
 
-    ESP_LOGI(TAG, "Flashing %d bytes in %d byte chunks", total_bytes, chunk_size);
+    // Use the (possibly truncated) firmware size, not the full file size
+    uint32_t total_bytes = firmware->size;
+    if (total_bytes > (uint32_t)file_size) {
+        ESP_LOGW(TAG, "Firmware size (%d) is larger than file size (%ld), using file size", total_bytes, file_size);
+        total_bytes = (uint32_t)file_size;
+    } else if (total_bytes < (uint32_t)file_size) {
+        ESP_LOGI(TAG, "Firmware truncated from %ld to %d bytes due to space constraints", file_size, total_bytes);
+    }
+
+    ESP_LOGI(TAG, "Flashing %d bytes in %d byte chunks (original file size: %ld)", total_bytes, chunk_size, file_size);
 
     // Debug: Check original file header before flashing
     uint8_t original_header[32];

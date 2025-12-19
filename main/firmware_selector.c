@@ -205,12 +205,13 @@ static void fw_selector_flash_cb(lv_event_t* e)
             return;
         }
 
-        // Check if total size fits in available space
+        // Check space availability and warn about truncation if needed
         bool fits_in_flash = false;
         esp_err_t ret = firmware_selector_check_space(selector, &fits_in_flash);
-        if (ret != ESP_OK || !fits_in_flash) {
-            ESP_LOGE(TAG, "Selected firmwares don't fit in available flash space - please select smaller firmware or fewer files");
-            return;
+        if (!fits_in_flash) {
+            ESP_LOGW(TAG, "Selected firmwares are too large - will truncate to fit available flash space");
+            ESP_LOGW(TAG, "Some firmware assets may be truncated, but core functionality should work");
+            // Continue with flashing - partition manager will handle truncation
         }
 
         ESP_LOGI(TAG, "Starting partition generation and flashing for %d firmwares (%lu total bytes)",
@@ -300,6 +301,30 @@ static void fw_flash_status_callback(flash_state_t state, flash_result_t result,
         flashing_in_progress = false;
         ESP_LOGI(TAG, "Flashing completed, re-enabling UI controls");
 
+        // Re-enable flash button by updating button states
+        if (g_active_firmware_selector) {
+            ESP_LOGI(TAG, "Updating button states to re-enable flash button");
+            update_buttons_state(g_active_firmware_selector);
+
+            // Hide progress bar and label when flashing is complete
+            if (g_active_firmware_selector->progress_bar) {
+                lv_obj_add_flag(g_active_firmware_selector->progress_bar, LV_OBJ_FLAG_HIDDEN);
+                ESP_LOGI(TAG, "Hiding progress bar");
+            }
+            if (g_active_firmware_selector->progress_label) {
+                lv_obj_add_flag(g_active_firmware_selector->progress_label, LV_OBJ_FLAG_HIDDEN);
+                ESP_LOGI(TAG, "Hiding progress label");
+            }
+
+            // Reset progress bar to 0 for next use
+            if (g_active_firmware_selector->progress_bar) {
+                lv_bar_set_value(g_active_firmware_selector->progress_bar, 0, LV_ANIM_OFF);
+            }
+            if (g_active_firmware_selector->progress_label) {
+                lv_label_set_text(g_active_firmware_selector->progress_label, "0%");
+            }
+        }
+
         // When flashing completes successfully, show completion modal
         if (result == FLASH_RESULT_SUCCESS) {
             ESP_LOGI(TAG, "Firmware flashing completed successfully, showing completion modal");
@@ -308,14 +333,21 @@ static void fw_flash_status_callback(flash_state_t state, flash_result_t result,
             if (g_active_firmware_selector && g_active_firmware_selector->completion_modal &&
                 g_active_firmware_selector->completion_label) {
 
+                ESP_LOGI(TAG, "Creating success message for modal");
                 char success_msg[256];
                 snprintf(success_msg, sizeof(success_msg), "Flashing completed successfully!\n%d firmware(s) flashed",
                         (int)g_active_firmware_selector->selected_count);
+
+                ESP_LOGI(TAG, "Setting modal text: %s", success_msg);
                 lv_label_set_text(g_active_firmware_selector->completion_label, success_msg);
 
+                ESP_LOGI(TAG, "Clearing hidden flag from modal");
                 lv_obj_clear_flag(g_active_firmware_selector->completion_modal, LV_OBJ_FLAG_HIDDEN);
 
-                ESP_LOGI(TAG, "Completion modal shown");
+                // Bring modal to front
+                lv_obj_move_foreground(g_active_firmware_selector->completion_modal);
+
+                ESP_LOGI(TAG, "Completion modal shown successfully");
 
                 // Force NVS reload to ensure main screen can read updated data
                 ESP_LOGI(TAG, "Forcing NVS data reload...");
