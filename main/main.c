@@ -177,7 +177,7 @@ static void start_tasks(void)
     BaseType_t ret = xTaskCreatePinnedToCore(
         lvgl_task,
         "lvgl_task",
-        4096,           // Stack size
+        8192,           // INCREASED: Stack size for CRC calculations and file operations (was 4096)
         NULL,           // Parameters
         configMAX_PRIORITIES - 1,  // HIGHEST priority - display stability
         &lvgl_task_handle,

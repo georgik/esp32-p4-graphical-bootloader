@@ -6,6 +6,8 @@
  */
 
 #include "lvgl_bootloader.h"
+#include "firmware_selector.h"
+#include "firmware_validator.h"
 #include "board_init.h"
 #include "esp_log.h"
 #include "lvgl.h"
@@ -27,9 +29,13 @@ static lv_obj_t *status_label = NULL;
 static lv_obj_t *progress_bar = NULL;
 static lv_obj_t *progress_label = NULL;
 
+// Firmware selector
+static firmware_selector_t firmware_selector;
+static bool firmware_selector_initialized = false;
+
 // Screen IDs
 static int current_screen = SCREEN_MAIN;
-static lv_obj_t *screens[3] = {0}; // MAIN, DEMO, SETTINGS
+static lv_obj_t *screens[4] = {0}; // MAIN, DEMO, SETTINGS, FIRMWARE_SELECTOR
 
 // Style objects
 static lv_style_t style_title;
@@ -93,8 +99,9 @@ static void demo_btn_event_cb(lv_event_t *e)
             break;
 
         case 3:
-            // Demo 4: Settings
-            switch_screen(SCREEN_SETTINGS);
+            // Select & Flash Firmware
+            ESP_LOGI(TAG, "Opening firmware selector...");
+            show_firmware_selector_screen();
             break;
     }
 }
@@ -122,7 +129,7 @@ static void create_main_screen(void)
         "Demo 1\nSD Card OTA",
         "Demo 2\nApplication",
         "Demo 3\nApplication",
-        "Demo 4\nSettings"
+        "Select & Flash\nFirmware"
     };
 
     lv_coord_t btn_width = 140;
@@ -409,9 +416,65 @@ esp_err_t lvgl_bootloader_init(void)
     return ESP_OK;
 }
 
+// Firmware selector integration functions
+esp_err_t init_firmware_selector_screen(void)
+{
+    if (!firmware_selector_initialized) {
+        ESP_LOGI(TAG, "Initializing firmware selector...");
+
+        esp_err_t ret = firmware_selector_init(&firmware_selector);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize firmware selector: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        ret = firmware_selector_scan_directory(&firmware_selector);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to scan firmware directory: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        ret = firmware_selector_create_ui(&firmware_selector);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to create firmware selector UI: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        firmware_selector_initialized = true;
+        ESP_LOGI(TAG, "Firmware selector initialized: %d firmware files found", firmware_selector.firmware_count);
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t show_firmware_selector_screen(void)
+{
+    esp_err_t ret = init_firmware_selector_screen();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    return firmware_selector_show(&firmware_selector);
+}
+
+esp_err_t hide_firmware_selector_screen(void)
+{
+    if (!firmware_selector_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return firmware_selector_hide(&firmware_selector);
+}
+
 void lvgl_bootloader_deinit(void)
 {
     ESP_LOGI(TAG, "Deinitializing LVGL bootloader...");
+
+    // Clean up firmware selector
+    if (firmware_selector_initialized) {
+        firmware_selector_cleanup(&firmware_selector);
+        firmware_selector_initialized = false;
+    }
 
     // Clean up styles
     lv_style_reset(&style_title);

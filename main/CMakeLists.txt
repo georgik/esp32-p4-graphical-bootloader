@@ -5,6 +5,10 @@ idf_component_register(
         "lvgl_bootloader.c"
         "board_init.c"
         "sd_ota.c"
+        "firmware_selector.c"
+        "firmware_validator.c"
+        "partition_manager.c"
+        "firmware_flasher.c"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES

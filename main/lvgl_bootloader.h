@@ -19,6 +19,7 @@ typedef enum {
     SCREEN_MAIN = 0,
     SCREEN_DEMO,
     SCREEN_SETTINGS,
+    SCREEN_FIRMWARE_SELECTOR,
     SCREEN_COUNT
 } screen_id_t;
 
@@ -88,6 +89,33 @@ void set_ota_in_progress(bool in_progress);
  * @return True if OTA is in progress
  */
 bool is_ota_in_progress(void);
+
+/**
+ * @brief Initialize firmware selector screen
+ *
+ * Initializes the firmware selector and scans for firmware files.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t init_firmware_selector_screen(void);
+
+/**
+ * @brief Show firmware selector screen
+ *
+ * Displays the firmware selection interface.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t show_firmware_selector_screen(void);
+
+/**
+ * @brief Hide firmware selector screen
+ *
+ * Hides the firmware selection interface.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t hide_firmware_selector_screen(void);
 
 #ifdef __cplusplus
 }
