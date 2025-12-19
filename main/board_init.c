@@ -139,12 +139,12 @@ esp_err_t board_init_display(void)
     esp_lcd_panel_handle_t panel_handle = NULL;
     esp_lcd_panel_io_handle_t io_handle = NULL;
     
-    // P4 requires proper DSI bus configuration
+    // P4 requires optimized DSI bus configuration for non-blocking operations
     const bsp_display_config_t bsp_disp_cfg = {
         .hdmi_resolution = 0,  // BSP_HDMI_RES_NONE - Use LCD, not HDMI
         .dsi_bus = {
-            .phy_clk_src = 0,  // MIPI_DSI_PHY_CLK_SRC_DEFAULT
-            .lane_bit_rate_mbps = 1000,  // BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS default
+            .phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT,
+            .lane_bit_rate_mbps = 1500,  // INCREASED: Better for 60fps at high resolution
         },
     };
     
@@ -182,13 +182,13 @@ esp_err_t board_init_display(void)
     height = 800;
     #endif
     
-    // Initialize raylib port layer
+    // Initialize raylib port layer with IRAM optimization to prevent PSRAM contention
     ray_port_cfg_t port_cfg = {
-        .buff_psram = true,
-        .double_buffer = false,
-        .buffer_pixels = 0,
-        .chunk_bytes = 0,  // DSI doesn't need chunking
-        .swap_rgb_bytes = false,  // DSI panels don't need byte swap
+        .buff_psram = false,                  // CRITICAL: Disable PSRAM to prevent contention
+        .double_buffer = false,               // Use single buffer in IRAM
+        .buffer_pixels = 0,                    // Use default (minimal) buffer
+        .chunk_bytes = width * 8 * 2,          // Smaller 8-line chunks for IRAM efficiency
+        .swap_rgb_bytes = false,              // DSI panels don't need byte swap
         .hres = width,
         .vres = height,
         .rotation = 0,

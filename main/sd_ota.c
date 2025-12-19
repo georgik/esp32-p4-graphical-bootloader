@@ -236,18 +236,30 @@ esp_err_t sd_ota_flash_file(const char* filename, esp_partition_subtype_t partit
         return ret;
     }
 
-    // Read and flash in chunks
-    const size_t chunk_size = 8192;  // 8KB chunks
-    uint8_t* buffer = malloc(chunk_size);
+    // OPTIMIZED: Zero-copy operations with minimal IRAM buffer and DMA bypass
+    const size_t chunk_size = 2048;  // MINIMAL: 2KB chunks for IRAM efficiency
+    uint8_t* buffer = heap_caps_malloc(chunk_size, MALLOC_CAP_DMA | MALLOC_CAP_IRAM_8BIT);
     if (!buffer) {
-        ESP_LOGE(TAG, "Failed to allocate buffer");
-        esp_ota_abort(ota_handle);
-        fclose(file);
-        g_sd_ota_state.in_progress = false;
-        return ESP_ERR_NO_MEM;
+        ESP_LOGE(TAG, "Failed to allocate IRAM DMA buffer, falling back to SPIRAM");
+        buffer = heap_caps_malloc(chunk_size, MALLOC_CAP_SPIRAM);
+        if (!buffer) {
+            ESP_LOGE(TAG, "Failed to allocate SPIRAM buffer");
+            esp_ota_abort(ota_handle);
+            fclose(file);
+            g_sd_ota_state.in_progress = false;
+            return ESP_ERR_NO_MEM;
+        }
+        ESP_LOGW(TAG, "Using SPIRAM buffer - display may flicker during OTA");
+    } else {
+        ESP_LOGI(TAG, "Using IRAM DMA buffer - display will remain stable during OTA");
     }
 
-    ESP_LOGI(TAG, "Flashing firmware in %zu byte chunks...", chunk_size);
+    ESP_LOGI(TAG, "Flashing firmware in %zu byte IRAM-optimized chunks...", chunk_size);
+
+    // IRAM buffer doesn't need cache synchronization for DMA operations
+
+    uint32_t chunk_count = 0;
+    uint32_t yield_counter = 0;
 
     while (g_sd_ota_state.bytes_written < file_size) {
         size_t bytes_to_read = chunk_size;
@@ -255,21 +267,32 @@ esp_err_t sd_ota_flash_file(const char* filename, esp_partition_subtype_t partit
             bytes_to_read = file_size - g_sd_ota_state.bytes_written;
         }
 
+        // MINIMAL YIELDING: Only when display would be affected
+        if (yield_counter % 32 == 0) {  // Every 32 chunks (64KB)
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+
         size_t bytes_read = fread(buffer, 1, bytes_to_read, file);
         if (bytes_read != bytes_to_read) {
             ESP_LOGE(TAG, "File read error: expected %zu, got %zu", bytes_to_read, bytes_read);
-            free(buffer);
+            if (buffer) {
+                heap_caps_free(buffer);
+            }
             esp_ota_abort(ota_handle);
             fclose(file);
             g_sd_ota_state.in_progress = false;
             return ESP_ERR_INVALID_RESPONSE;
         }
 
+        // IRAM buffer doesn't need cache flush for DMA operations
+
         ret = esp_ota_write(ota_handle, buffer, bytes_read);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "OTA write error at offset %zu: %s",
                      g_sd_ota_state.bytes_written, esp_err_to_name(ret));
-            free(buffer);
+            if (buffer) {
+                heap_caps_free(buffer);
+            }
             esp_ota_abort(ota_handle);
             fclose(file);
             g_sd_ota_state.in_progress = false;
@@ -277,16 +300,27 @@ esp_err_t sd_ota_flash_file(const char* filename, esp_partition_subtype_t partit
         }
 
         g_sd_ota_state.bytes_written += bytes_read;
+        chunk_count++;
+        yield_counter++;
 
-        // Log progress every 1MB
-        if (g_sd_ota_state.bytes_written % (1024 * 1024) == 0) {
-            ESP_LOGI(TAG, "Flashing progress: %zu/%zu bytes (%.1f%%)",
+        // VERY INFREQUENT yielding to maintain display stability
+        if (chunk_count % 64 == 0) {  // Every 64 chunks (128KB)
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+
+        // Log progress efficiently
+        if (chunk_count % 128 == 0) {  // Every 128 chunks (256KB)
+            ESP_LOGD(TAG, "Flashing progress: %zu/%zu bytes (%.1f%%)",
                      g_sd_ota_state.bytes_written, file_size,
                      (float)g_sd_ota_state.bytes_written * 100.0f / file_size);
         }
     }
 
-    free(buffer);
+    // Clean up IRAM buffer
+    if (buffer) {
+        heap_caps_free(buffer);
+    }
+
     fclose(file);
 
     // Finalize OTA

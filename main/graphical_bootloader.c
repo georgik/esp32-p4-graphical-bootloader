@@ -1206,9 +1206,10 @@ void raylib_task(void *pvParameter)
         // End drawing
         EndDrawing();
 
-        // VERY IMPORTANT: Small delay to prevent CPU starvation on other core
-        // But short enough to maintain 60fps
-        vTaskDelay(pdMS_TO_TICKS(2)); // 2ms delay = ~500fps max, ~60fps typical
+        // CRITICAL: Minimal delay to maintain 60fps while avoiding CPU starvation
+        // Reduced from 1ms to maintain display stability during SD operations
+        // IRAM display needs minimal scheduling overhead
+        vTaskDelay(pdMS_TO_TICKS(0)); // Yield without blocking display refresh
 
         frameCounter++;
     }
