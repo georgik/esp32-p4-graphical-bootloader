@@ -103,8 +103,9 @@ esp_err_t firmware_flasher_start(const flash_config_t* config)
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Store the firmware selector pointer
-    g_flash_config.firmware_selector = config->firmware_selector;
+    // Copy the entire configuration to global state
+    g_flash_config = *config;
+    g_flash_config.firmware_selector = config->firmware_selector; // Ensure pointer is valid
 
     // Create flash task with minimal parameters
     BaseType_t ret = xTaskCreate(flash_task, "flash_task", 12288, g_flash_config.firmware_selector,
@@ -598,6 +599,7 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
             xSemaphoreGive(g_flash_mutex);
 
             // Call progress callback
+            ESP_LOGD(TAG, "Calling notify_progress: firmware=%d, progress=%d", firmware_index + 1, progress);
             notify_progress(firmware_index + 1, progress,
                            bytes_flashed == total_bytes ? "Finalizing" : "Flashing");
         }
@@ -953,9 +955,16 @@ static void update_statistics(void)
 
 static void notify_progress(uint32_t current_firmware, uint32_t current_progress, const char* message)
 {
+    ESP_LOGD(TAG, "notify_progress called: firmware=%d, progress=%d, total_firmwares=%d, callback=%p",
+             current_firmware, current_progress, g_flash_stats.total_firmwares,
+             g_flash_config.progress_callback);
+
     if (g_flash_config.progress_callback) {
+        ESP_LOGD(TAG, "Calling progress callback");
         g_flash_config.progress_callback(current_firmware, g_flash_stats.total_firmwares,
                                         current_progress, 100, message);
+    } else {
+        ESP_LOGW(TAG, "No progress callback configured!");
     }
 }
 
