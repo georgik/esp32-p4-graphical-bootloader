@@ -38,6 +38,7 @@ static void fw_selector_select_all_cb(lv_event_t* e);
 static void fw_selector_clear_cb(lv_event_t* e);
 static void fw_selector_flash_cb(lv_event_t* e);
 static void fw_selector_back_cb(lv_event_t* e);
+static void fw_selector_modal_ok_cb(lv_event_t* e);
 static void fw_flash_progress_callback(uint32_t current_firmware, uint32_t total_firmwares,
                                        uint32_t current_progress, uint32_t total_progress, const char* status_message);
 static void fw_flash_status_callback(flash_state_t state, flash_result_t result, const char* status_message);
@@ -208,9 +209,8 @@ static void fw_selector_flash_cb(lv_event_t* e)
         bool fits_in_flash = false;
         esp_err_t ret = firmware_selector_check_space(selector, &fits_in_flash);
         if (ret != ESP_OK || !fits_in_flash) {
-            ESP_LOGW(TAG, "Selected firmwares don't fit in available flash space - will flash what fits");
-            ESP_LOGW(TAG, "Some assets may be skipped, but core functionality should work");
-            // Continue with flashing - partition manager will handle space constraints
+            ESP_LOGE(TAG, "Selected firmwares don't fit in available flash space - please select smaller firmware or fewer files");
+            return;
         }
 
         ESP_LOGI(TAG, "Starting partition generation and flashing for %d firmwares (%lu total bytes)",
@@ -266,31 +266,88 @@ static void fw_selector_flash_cb(lv_event_t* e)
     }
 }
 
+// Modal OK button callback
+static void fw_selector_modal_ok_cb(lv_event_t* e)
+{
+    firmware_selector_t* selector = (firmware_selector_t*)lv_event_get_user_data(e);
+    if (selector && selector->completion_modal) {
+        // Hide modal
+        lv_obj_add_flag(selector->completion_modal, LV_OBJ_FLAG_HIDDEN);
+
+        // Switch back to main screen and refresh it
+        switch_screen(SCREEN_MAIN);
+
+        // Small delay to ensure NVS operations are complete
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        refresh_main_screen();
+
+        ESP_LOGI(TAG, "Modal closed, main screen refreshed");
+    }
+}
+
 // LVGL status callback for firmware flashing completion
 static void fw_flash_status_callback(flash_state_t state, flash_result_t result, const char* status_message)
 {
     ESP_LOGI(TAG, "Flash Status: state=%d, result=%d, message=%s", state, result, status_message ? status_message : "NULL");
+    ESP_LOGD(TAG, "Active selector: %p, completion_modal: %p, completion_label: %p",
+             g_active_firmware_selector,
+             g_active_firmware_selector ? g_active_firmware_selector->completion_modal : NULL,
+             g_active_firmware_selector ? g_active_firmware_selector->completion_label : NULL);
 
     // When flashing completes (successfully or not), clear the flashing in progress state
     if (state == FLASH_STATE_COMPLETED) {
         flashing_in_progress = false;
         ESP_LOGI(TAG, "Flashing completed, re-enabling UI controls");
 
-        // When flashing completes successfully, switch back to main screen and refresh it
+        // When flashing completes successfully, show completion modal
         if (result == FLASH_RESULT_SUCCESS) {
-            ESP_LOGI(TAG, "Firmware flashing completed successfully, switching to main screen and refreshing");
+            ESP_LOGI(TAG, "Firmware flashing completed successfully, showing completion modal");
 
-            // First switch back to main screen, then delay slightly to ensure NVS is committed, then refresh
-            switch_screen(SCREEN_MAIN);
+            // Show completion modal with success message
+            if (g_active_firmware_selector && g_active_firmware_selector->completion_modal &&
+                g_active_firmware_selector->completion_label) {
 
-            // Small delay to ensure NVS operations are complete
-            vTaskDelay(pdMS_TO_TICKS(100));
+                char success_msg[256];
+                snprintf(success_msg, sizeof(success_msg), "Flashing completed successfully!\n%d firmware(s) flashed",
+                        (int)g_active_firmware_selector->selected_count);
+                lv_label_set_text(g_active_firmware_selector->completion_label, success_msg);
 
-            refresh_main_screen();
+                lv_obj_clear_flag(g_active_firmware_selector->completion_modal, LV_OBJ_FLAG_HIDDEN);
 
-            ESP_LOGI(TAG, "Main screen switch and refresh completed");
+                ESP_LOGI(TAG, "Completion modal shown");
+
+                // Force NVS reload to ensure main screen can read updated data
+                ESP_LOGI(TAG, "Forcing NVS data reload...");
+                esp_err_t nvs_err = nvs_flash_deinit();
+                if (nvs_err == ESP_OK) {
+                    vTaskDelay(pdMS_TO_TICKS(50)); // Small delay
+                    nvs_err = nvs_flash_init();
+                    if (nvs_err != ESP_OK) {
+                        ESP_LOGW(TAG, "Failed to reinitialize NVS: %s", esp_err_to_name(nvs_err));
+                    } else {
+                        ESP_LOGI(TAG, "NVS reinitialized successfully, data should be reloaded");
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Failed to deinit NVS: %s", esp_err_to_name(nvs_err));
+                }
+            }
         } else {
             ESP_LOGW(TAG, "Firmware flashing completed with errors: result=%d", result);
+
+            // Show error modal
+            if (g_active_firmware_selector && g_active_firmware_selector->completion_modal &&
+                g_active_firmware_selector->completion_label) {
+
+                char error_msg[256];
+                snprintf(error_msg, sizeof(error_msg), "Flashing failed!\nError code: %d\nPlease check the logs", result);
+                lv_label_set_text(g_active_firmware_selector->completion_label, error_msg);
+
+                // Change modal color to red for error
+                lv_obj_set_style_border_color(g_active_firmware_selector->completion_modal, lv_color_hex(0xaa0000), 0);
+
+                lv_obj_clear_flag(g_active_firmware_selector->completion_modal, LV_OBJ_FLAG_HIDDEN);
+            }
         }
     }
 }
@@ -299,15 +356,26 @@ static void fw_flash_status_callback(flash_state_t state, flash_result_t result,
 static void fw_flash_progress_callback(uint32_t current_firmware, uint32_t total_firmwares,
                                    uint32_t current_progress, uint32_t total_progress, const char* status_message)
 {
-    ESP_LOGD(TAG, "Flash Progress: %lu/%lu, %lu%% - %s",
+    ESP_LOGI(TAG, "Flash Progress: %lu/%lu, %lu/%lu - %s",
              (unsigned long)current_firmware, (unsigned long)total_firmwares,
-             (unsigned long)current_progress, status_message);
+             (unsigned long)current_progress, (unsigned long)total_progress, status_message ? status_message : "NULL");
 
     // Update firmware selector progress bar and percentage if available
     extern firmware_selector_t* g_active_firmware_selector; // Global reference to active selector
+    ESP_LOGD(TAG, "Active selector: %p, progress_bar: %p, progress_label: %p",
+             g_active_firmware_selector,
+             g_active_firmware_selector ? g_active_firmware_selector->progress_bar : NULL,
+             g_active_firmware_selector ? g_active_firmware_selector->progress_label : NULL);
+
     if (g_active_firmware_selector && g_active_firmware_selector->progress_bar && g_active_firmware_selector->progress_label) {
+        // Show progress elements (they might be hidden from initial state)
+        lv_obj_clear_flag(g_active_firmware_selector->progress_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_active_firmware_selector->progress_label, LV_OBJ_FLAG_HIDDEN);
+
         if (total_progress > 0) {
             uint8_t percentage = (uint8_t)((current_progress * 100) / total_progress);
+
+            ESP_LOGD(TAG, "Updating progress bar to %d%%", percentage);
 
             // Update progress bar
             lv_bar_set_value(g_active_firmware_selector->progress_bar, percentage, LV_ANIM_OFF);
@@ -316,6 +384,8 @@ static void fw_flash_progress_callback(uint32_t current_firmware, uint32_t total
             char progress_text[16];
             snprintf(progress_text, sizeof(progress_text), "%d%%", percentage);
             lv_label_set_text(g_active_firmware_selector->progress_label, progress_text);
+
+            ESP_LOGD(TAG, "Progress updated: bar=%d, text=%s", percentage, progress_text);
         }
     } else {
         // Fallback to global progress bar if firmware selector not available
@@ -391,6 +461,21 @@ static void update_firmware_list_item(firmware_selector_t* selector, uint32_t in
     if (label && lv_obj_check_type(label, &lv_label_class)) {
         lv_label_set_text(label, item_text);
     }
+
+    // Update visual style for selected items
+    if (fw->is_selected) {
+        // Selected items get green background and white text
+        lv_obj_set_style_bg_color(fw->list_item, lv_color_hex(0x00aa00), 0);
+        lv_obj_set_style_border_color(fw->list_item, lv_color_hex(0x007700), 0);
+        lv_obj_set_style_border_width(fw->list_item, 2, 0);
+        lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    } else {
+        // Unselected items get lighter styling for white background
+        lv_obj_set_style_bg_color(fw->list_item, lv_color_hex(0xe0e0e0), 0); // Light gray
+        lv_obj_set_style_border_color(fw->list_item, lv_color_hex(0xcccccc), 0);
+        lv_obj_set_style_border_width(fw->list_item, 1, 0);
+        lv_obj_set_style_text_color(label, lv_color_hex(0x333333), 0); // Dark text
+    }
 }
 
 static void update_buttons_state(firmware_selector_t* selector)
@@ -431,12 +516,12 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
     // Create main screen
     selector->screen = lv_obj_create(NULL);
     lv_obj_set_size(selector->screen, FW_SELECTOR_SCREEN_WIDTH, FW_SELECTOR_SCREEN_HEIGHT);
-    lv_obj_set_style_bg_color(selector->screen, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(selector->screen, lv_color_white(), 0);
 
     // Create title - larger and more prominent for 1024px screen
     lv_obj_t* title = lv_label_create(selector->screen);
     lv_label_set_text(title, "Select Firmware Files");
-    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_set_style_text_color(title, lv_color_black(), 0);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0); // Larger font
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
 
@@ -444,9 +529,9 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
     selector->list = lv_list_create(selector->screen);
     lv_obj_set_size(selector->list, FW_SELECTOR_SCREEN_WIDTH - 40, FW_LIST_HEIGHT); // More padding
     lv_obj_align(selector->list, LV_ALIGN_TOP_MID, 0, 60); // More space for title
-    lv_obj_set_style_bg_color(selector->list, lv_color_hex(0x303030), 0);
+    lv_obj_set_style_bg_color(selector->list, lv_color_hex(0xf5f5f5), 0); // Light gray background
     lv_obj_set_style_border_width(selector->list, 2, 0);
-    lv_obj_set_style_border_color(selector->list, lv_color_hex(0x606060), 0);
+    lv_obj_set_style_border_color(selector->list, lv_color_hex(0xcccccc), 0);
     lv_obj_set_style_radius(selector->list, 10, 0); // Rounded corners
 
     // Add firmware items to list - with small delays to prevent LVGL overload
@@ -486,7 +571,7 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
 
     // Create status label - larger and more visible
     selector->status_label = lv_label_create(selector->screen);
-    lv_obj_set_style_text_color(selector->status_label, lv_color_hex(0x00ff00), 0);
+    lv_obj_set_style_text_color(selector->status_label, lv_color_hex(0x333333), 0); // Dark gray text
     lv_obj_set_style_text_font(selector->status_label, &lv_font_montserrat_14, 0);
     lv_label_set_text(selector->status_label, "Ready");
     lv_obj_align(selector->status_label, LV_ALIGN_BOTTOM_LEFT, 20, -100);
@@ -501,7 +586,7 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
 
     // Create progress percentage label
     selector->progress_label = lv_label_create(selector->screen);
-    lv_obj_set_style_text_color(selector->progress_label, lv_color_hex(0x00ff00), 0);
+    lv_obj_set_style_text_color(selector->progress_label, lv_color_hex(0x333333), 0); // Dark gray text
     lv_obj_set_style_text_font(selector->progress_label, &lv_font_montserrat_14, 0);
     lv_label_set_text(selector->progress_label, "0%");
     lv_obj_align_to(selector->progress_label, selector->progress_bar, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
@@ -552,6 +637,35 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
     lv_label_set_text(label, "Back");
     lv_obj_center(label);
 
+    // Create completion modal (initially hidden)
+    selector->completion_modal = lv_obj_create(selector->screen);
+    lv_obj_set_size(selector->completion_modal, 400, 200);
+    lv_obj_center(selector->completion_modal);
+    lv_obj_set_style_bg_color(selector->completion_modal, lv_color_hex(0x2c2c2c), 0);
+    lv_obj_set_style_border_color(selector->completion_modal, lv_color_hex(0x00aa00), 0);
+    lv_obj_set_style_border_width(selector->completion_modal, 3, 0);
+    lv_obj_set_style_radius(selector->completion_modal, 15, 0);
+    lv_obj_add_flag(selector->completion_modal, LV_OBJ_FLAG_HIDDEN); // Initially hidden
+
+    // Create completion label
+    selector->completion_label = lv_label_create(selector->completion_modal);
+    lv_obj_set_style_text_color(selector->completion_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(selector->completion_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_align(selector->completion_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(selector->completion_label, LV_ALIGN_TOP_MID, 0, 30);
+    lv_label_set_text(selector->completion_label, "Flashing completed successfully!");
+
+    // Create OK button for modal
+    lv_obj_t* ok_btn = lv_btn_create(selector->completion_modal);
+    lv_obj_set_size(ok_btn, 80, 40);
+    lv_obj_align(ok_btn, LV_ALIGN_BOTTOM_MID, 0, -20);
+    lv_obj_set_style_bg_color(ok_btn, lv_color_hex(0x00aa00), 0);
+    lv_obj_add_event_cb(ok_btn, fw_selector_modal_ok_cb, LV_EVENT_CLICKED, selector);
+
+    label = lv_label_create(ok_btn);
+    lv_label_set_text(label, "OK");
+    lv_obj_center(label);
+
     // Update UI state
     update_buttons_state(selector);
 
@@ -589,6 +703,12 @@ esp_err_t firmware_selector_hide(firmware_selector_t* selector)
     }
 
     ESP_LOGI(TAG, "Hiding firmware selection screen");
+
+    // Clear global reference when hiding
+    if (g_active_firmware_selector == selector) {
+        g_active_firmware_selector = NULL;
+    }
+
     // Screen will be hidden when another screen is loaded
     return ESP_OK;
 }

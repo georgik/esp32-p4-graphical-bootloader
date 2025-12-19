@@ -54,6 +54,7 @@ static esp_err_t write_partition_table_data(const uint8_t* buffer, size_t size);
 static void hexdump_and_verify_partition_table(size_t expected_size, const uint8_t* expected_buffer);
 static esp_err_t backup_partition_table(void);
 static esp_err_t verify_all_firmwares(void);
+static esp_err_t verify_flashed_data(const esp_partition_t* partition, firmware_info_t* firmware);
 static void update_statistics(void);
 static void notify_progress(uint32_t current_firmware, uint32_t current_progress, const char* message);
 static void notify_status(flash_state_t state, flash_result_t result, const char* message);
@@ -491,6 +492,35 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
 
     ESP_LOGI(TAG, "Flashing %d bytes in %d byte chunks", total_bytes, chunk_size);
 
+    // Debug: Check original file header before flashing
+    uint8_t original_header[32];
+    fseek(file, 0, SEEK_SET);
+    size_t header_read = fread(original_header, 1, sizeof(original_header), file);
+    fseek(file, 0, SEEK_SET);
+    if (header_read == sizeof(original_header)) {
+        ESP_LOGI(TAG, "Original file header (first 32 bytes):");
+        ESP_LOG_BUFFER_HEX(TAG, original_header, 32);
+
+        // Check ESP32 image magic byte in original file
+        uint32_t orig_magic = *(uint32_t*)original_header;
+        ESP_LOGI(TAG, "Original file magic: 0x%08x (expected: 0xE9)", orig_magic);
+
+        if (orig_magic != 0xE9) {
+            ESP_LOGW(TAG, "WARNING: File does not appear to be a valid ESP32 app image!");
+        }
+    }
+
+    // Erase the entire OTA partition before writing
+    ESP_LOGI(TAG, "Erasing OTA partition at 0x%08x (size: 0x%08x)", ota_partition->address, ota_partition->size);
+    ret = esp_flash_erase_region(NULL, ota_partition->address, ota_partition->size);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to erase OTA partition: %s", esp_err_to_name(ret));
+        free(buffer);
+        fclose(file);
+        return ret;
+    }
+    ESP_LOGI(TAG, "OTA partition erased successfully");
+
     while (bytes_flashed < total_bytes && !g_abort_requested) {
         size_t bytes_to_read = chunk_size;
         if (bytes_flashed + bytes_to_read > total_bytes) {
@@ -528,6 +558,10 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
             g_flash_stats.current_firmware = firmware_index;
             g_flash_stats.written_bytes = bytes_flashed;
             xSemaphoreGive(g_flash_mutex);
+
+            // Call progress callback
+            notify_progress(firmware_index + 1, progress,
+                           bytes_flashed == total_bytes ? "Finalizing" : "Flashing");
         }
     }
 
@@ -539,8 +573,33 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG, "Successfully flashed firmware %s to partition %s",
-             firmware->display_name, ota_partition->label);
+    ESP_LOGI(TAG, "Successfully flashed firmware %s to partition %s (0x%08x)",
+             firmware->display_name, ota_partition->label, ota_partition->address);
+
+    // Debug: Hexdump first 64 bytes of flashed data to check ESP32 image header
+    uint8_t header_buffer[64];
+    ret = esp_partition_read(ota_partition, 0, header_buffer, sizeof(header_buffer));
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Flashed image header (first 32 bytes):");
+        ESP_LOG_BUFFER_HEX(TAG, header_buffer, 32);
+
+        // Check ESP32 image magic byte
+        uint32_t magic = *(uint32_t*)header_buffer;
+        ESP_LOGI(TAG, "Image magic: 0x%08x (expected: 0xE9)", magic);
+
+        // Check image length
+        uint32_t image_len = *(uint32_t*)(header_buffer + 4);
+        ESP_LOGI(TAG, "Image length from header: %d bytes", image_len);
+
+        // Check image CRC
+        uint32_t image_crc = *(uint8_t*)(header_buffer + 24) |
+                            (*(uint8_t*)(header_buffer + 25) << 8) |
+                            (*(uint8_t*)(header_buffer + 26) << 16) |
+                            (*(uint8_t*)(header_buffer + 27) << 24);
+        ESP_LOGI(TAG, "Image CRC from header: 0x%08x", image_crc);
+    } else {
+        ESP_LOGE(TAG, "Failed to read header for verification: %s", esp_err_to_name(ret));
+    }
 
     // Verify flash (if enabled)
     if (g_flash_config.enable_verification) {

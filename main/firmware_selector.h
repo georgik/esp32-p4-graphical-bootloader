@@ -58,6 +58,8 @@ typedef struct {
     lv_obj_t* status_label;                     // Status message label
     lv_obj_t* progress_bar;                     // Flashing progress bar
     lv_obj_t* progress_label;                   // Progress percentage label
+    lv_obj_t* completion_modal;                 // Completion modal window
+    lv_obj_t* completion_label;                 // Completion message label
     lv_obj_t* select_all_btn;                   // Select all button
     lv_obj_t* clear_btn;                        // Clear selection button
     lv_obj_t* flash_btn;                        // Start flashing button
