@@ -7,6 +7,7 @@
 #include "firmware_validator.h"
 #include "partition_manager.h"
 #include "firmware_flasher.h"
+#include "lvgl_bootloader.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_vfs_fat.h"
@@ -288,9 +289,7 @@ static void fw_selector_back_cb(lv_event_t* e)
         firmware_selector_hide(selector);
 
         // Return to main screen by switching to SCREEN_MAIN
-        // Note: This requires access to switch_screen function from lvgl_bootloader
-        extern void switch_screen(int screen_id);
-        switch_screen(0);  // SCREEN_MAIN
+        switch_screen(SCREEN_MAIN);
     }
 }
 

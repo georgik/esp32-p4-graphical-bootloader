@@ -20,6 +20,7 @@ typedef enum {
     SCREEN_DEMO,
     SCREEN_SETTINGS,
     SCREEN_FIRMWARE_SELECTOR,
+    SCREEN_BOOT_MENU,
     SCREEN_COUNT
 } screen_id_t;
 
@@ -116,6 +117,34 @@ esp_err_t show_firmware_selector_screen(void);
  * @return ESP_OK on success, error code otherwise
  */
 esp_err_t hide_firmware_selector_screen(void);
+
+/**
+ * @brief Show boot menu screen
+ *
+ * Displays the boot menu with available firmware applications.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t show_boot_menu_screen(void);
+
+/**
+ * @brief Hide boot menu screen
+ *
+ * Hides the boot menu interface.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t hide_boot_menu_screen(void);
+
+/**
+ * @brief Boot firmware from specific OTA partition
+ *
+ * Sets up and boots firmware from the specified OTA partition.
+ *
+ * @param partition_name Name of the OTA partition to boot from
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t boot_firmware_from_partition(const char* partition_name);
 
 #ifdef __cplusplus
 }
