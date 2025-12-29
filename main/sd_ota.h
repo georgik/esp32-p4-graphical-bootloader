@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #ifndef SD_OTA_H
 #define SD_OTA_H
 

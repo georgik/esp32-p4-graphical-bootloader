@@ -17,6 +17,7 @@
 #include <dirent.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -44,6 +45,7 @@ static void fw_flash_progress_callback(uint32_t current_firmware, uint32_t total
 static void fw_flash_status_callback(flash_state_t state, flash_result_t result, const char* status_message);
 
 static void update_firmware_list_item(firmware_selector_t* selector, uint32_t index);
+static void update_firmware_list_item_text_only(firmware_selector_t* selector, uint32_t index);
 static void update_buttons_state(firmware_selector_t* selector);
 
 esp_err_t firmware_selector_init(firmware_selector_t* selector)
@@ -60,8 +62,20 @@ esp_err_t firmware_selector_init(firmware_selector_t* selector)
     // Ensure firmware directory exists
     struct stat st;
     if (stat(FIRMWARE_DIRECTORY, &st) != 0) {
-        ESP_LOGW(TAG, "Firmware directory not found: %s", FIRMWARE_DIRECTORY);
-        // Note: Directory creation could be added here if needed
+        ESP_LOGW(TAG, "Firmware directory not found: %s, creating it...", FIRMWARE_DIRECTORY);
+        // Create directory with parents
+        #ifdef __SIMULATOR_BUILD__
+            // On simulator, use system command to create with parents
+            char cmd[512];
+            snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", FIRMWARE_DIRECTORY);
+            system(cmd);
+        #else
+            // On hardware, create with parents (may fail if parent doesn't exist)
+            mkdir(FIRMWARE_DIRECTORY, 0755);
+        #endif
+        ESP_LOGI(TAG, "Firmware directory created: %s", FIRMWARE_DIRECTORY);
+    } else {
+        ESP_LOGI(TAG, "Firmware directory found: %s", FIRMWARE_DIRECTORY);
     }
 
     selector->is_initialized = true;
@@ -168,10 +182,43 @@ static void fw_selector_list_event_cb(lv_event_t* e)
         return;
     }
 
+    ESP_LOGI(TAG, "List item clicked - obj: %p", (void*)obj);
+
     // Find firmware index
     for (uint32_t i = 0; i < selector->firmware_count; i++) {
         if (selector->firmware_list[i].list_item == obj) {
-            firmware_selector_toggle_selection(selector, i);
+            ESP_LOGI(TAG, "Clicked firmware %lu: %s", (unsigned long)i, selector->firmware_list[i].display_name);
+
+            // Toggle selection state
+            selector->firmware_list[i].is_selected = !selector->firmware_list[i].is_selected;
+
+            // Update the icon prefix
+            char item_text[256];
+            snprintf(item_text, sizeof(item_text), "%s %s",
+                     selector->firmware_list[i].is_selected ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE,
+                     selector->firmware_list[i].display_name);
+
+            // Get the label and update it
+            lv_obj_t* label = lv_obj_get_child(obj, 0);
+            if (label && lv_obj_check_type(label, &lv_label_class)) {
+                ESP_LOGD(TAG, "Updating label text to: %s", item_text);
+                lv_label_set_text(label, item_text);
+
+                // CRITICAL: Re-align the label after text update to prevent garbled display
+                // The label position gets messed up when text changes, so we re-center it
+                lv_obj_align(label, LV_ALIGN_LEFT_MID, 10, 0);
+
+                // Force a redraw of this specific button
+                lv_obj_invalidate(obj);
+            } else {
+                ESP_LOGW(TAG, "Label not found or wrong type (label=%p)", (void*)label);
+            }
+
+            // Remove checked/pressed/focused states to prevent visual artifacts
+            lv_obj_remove_state(obj, LV_STATE_PRESSED);
+            lv_obj_remove_state(obj, LV_STATE_CHECKED);
+            lv_obj_remove_state(obj, LV_STATE_FOCUSED);
+
             break;
         }
     }
@@ -414,7 +461,8 @@ static void fw_flash_status_callback(flash_state_t state, flash_result_t result,
                 lv_label_set_text(g_active_firmware_selector->completion_label, error_msg);
 
                 // Change modal color to red for error
-                lv_obj_set_style_border_color(g_active_firmware_selector->completion_modal, lv_color_hex(0xaa0000), 0);
+                // REMOVED: Border style causes crash in LVGL border rendering
+                lv_obj_set_style_bg_color(g_active_firmware_selector->completion_modal, lv_color_hex(0xaa0000), 0);
 
                 lv_obj_clear_flag(g_active_firmware_selector->completion_modal, LV_OBJ_FLAG_HIDDEN);
             }
@@ -548,6 +596,38 @@ static void update_firmware_list_item(firmware_selector_t* selector, uint32_t in
     }
 }
 
+// Safe version that only updates text, no styles (to avoid LVGL freeze)
+static void update_firmware_list_item_text_only(firmware_selector_t* selector, uint32_t index)
+{
+    if (!selector || index >= selector->firmware_count) {
+        return;
+    }
+
+    firmware_info_t* fw = &selector->firmware_list[index];
+    if (!fw->list_item) {
+        return;
+    }
+
+    // Create item text with just icon and name (no size to avoid truncation)
+    char item_text[256];
+    snprintf(item_text, sizeof(item_text), "%s %s",
+             fw->is_selected ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE,
+             fw->display_name);
+
+    // Update the label text
+    lv_obj_t* label = lv_obj_get_child(fw->list_item, 0);
+    if (label && lv_obj_check_type(label, &lv_label_class)) {
+        lv_label_set_text(label, item_text);
+
+        // CRITICAL: Re-align the label after text update to prevent garbled display
+        // The label position gets messed up when text changes, so we re-center it
+        lv_obj_align(label, LV_ALIGN_LEFT_MID, 10, 0);
+
+        // Force a redraw of this specific button
+        lv_obj_invalidate(fw->list_item);
+    }
+}
+
 static void update_buttons_state(firmware_selector_t* selector)
 {
     if (!selector) {
@@ -585,7 +665,8 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
 
     // Create main screen
     selector->screen = lv_obj_create(NULL);
-    lv_obj_set_size(selector->screen, FW_SELECTOR_SCREEN_WIDTH, FW_SELECTOR_SCREEN_HEIGHT);
+    // DON'T set size - let LVGL handle it automatically (like our working test screen)
+    // lv_obj_set_size(selector->screen, FW_SELECTOR_SCREEN_WIDTH, FW_SELECTOR_SCREEN_HEIGHT);
     lv_obj_set_style_bg_color(selector->screen, lv_color_white(), 0);
 
     // Create title - larger and more prominent for 1024px screen
@@ -595,41 +676,66 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0); // Larger font
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
 
-    // Create firmware list - optimized for 1024px width
-    selector->list = lv_list_create(selector->screen);
-    lv_obj_set_size(selector->list, FW_SELECTOR_SCREEN_WIDTH - 40, FW_LIST_HEIGHT); // More padding
-    lv_obj_align(selector->list, LV_ALIGN_TOP_MID, 0, 60); // More space for title
-    lv_obj_set_style_bg_color(selector->list, lv_color_hex(0xf5f5f5), 0); // Light gray background
-    lv_obj_set_style_border_width(selector->list, 2, 0);
-    lv_obj_set_style_border_color(selector->list, lv_color_hex(0xcccccc), 0);
-    lv_obj_set_style_radius(selector->list, 10, 0); // Rounded corners
+    // Create firmware list - use custom scrollable view instead of lv_list
+    // lv_list_add_btn() creates buttons with default borders that crash on macOS
+    // So we create a scrollable container and add buttons manually with full control
+    ESP_LOGI(TAG, "Creating custom firmware list view");
 
-    // Add firmware items to list - with small delays to prevent LVGL overload
-    ESP_LOGI(TAG, "Adding %lu firmware items to list...", (unsigned long)selector->firmware_count);
+    lv_obj_t* list_view = lv_obj_create(selector->screen);
+    lv_obj_set_width(list_view, 650);
+    lv_obj_set_height(list_view, 350);  // Fixed height for scrollable area
+    lv_obj_align(list_view, LV_ALIGN_TOP_MID, 0, 60);
+    lv_obj_set_scrollbar_mode(list_view, LV_SCROLLBAR_MODE_OFF);
+
+    // Make it flexible column layout for buttons
+    lv_obj_set_layout(list_view, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(list_view, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list_view, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    // Disable borders on the container itself
+    lv_obj_set_style_border_width(list_view, 0, 0);
+    lv_obj_set_style_border_opa(list_view, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(list_view, 5, 0);
+
+    selector->list = list_view;  // Store for reference
+
+    // Add firmware items as individual buttons
+    ESP_LOGI(TAG, "Adding %lu firmware items to custom list view...", (unsigned long)selector->firmware_count);
 
     for (uint32_t i = 0; i < selector->firmware_count; i++) {
         firmware_info_t* fw = &selector->firmware_list[i];
 
         ESP_LOGD(TAG, "Adding firmware %lu: %s", (unsigned long)i, fw->display_name);
 
-        // Create list item with simple name first
-        lv_obj_t* btn = lv_list_add_btn(selector->list, LV_SYMBOL_FILE, fw->display_name);
-        if (!btn) {
-            ESP_LOGE(TAG, "Failed to create list button for firmware %lu", (unsigned long)i);
-            continue;
-        }
+        // Create button for each firmware
+        lv_obj_t* btn = lv_btn_create(list_view);
+        lv_obj_set_width(btn, 630);  // Slightly narrower than container
+        lv_obj_set_height(btn, 50);  // Fixed height for each button
+
+        // CRITICAL: Disable borders BEFORE adding to parent to avoid crash
+        lv_obj_set_style_border_width(btn, 0, 0);
+        lv_obj_set_style_border_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0xf0f0f0), 0);
+
+        // Create label with icon and text
+        lv_obj_t* label = lv_label_create(btn);
+        char item_text[256];
+        snprintf(item_text, sizeof(item_text), "%s %s",
+                 LV_SYMBOL_FILE, fw->display_name);
+        lv_label_set_text(label, item_text);
+        lv_obj_set_style_text_color(label, lv_color_black(), 0);
+        lv_obj_align(label, LV_ALIGN_LEFT_MID, 10, 0);
 
         fw->list_item = btn;
 
         // Set click callback
         lv_obj_add_event_cb(btn, fw_selector_list_event_cb, LV_EVENT_CLICKED, selector);
 
-        // Update item display after creation
-        update_firmware_list_item(selector, i);
+        ESP_LOGD(TAG, "Firmware %lu button created (custom style, no borders)", (unsigned long)i);
 
-        // Small delay every few items to let LVGL breathe
-        if (i % 5 == 0) {
-            vTaskDelay(pdMS_TO_TICKS(10));
+        // Small delay to let LVGL process each item
+        if (i < selector->firmware_count - 1) {  // Don't delay after last item
+            vTaskDelay(pdMS_TO_TICKS(50));  // 50ms between items
         }
     }
 
@@ -712,8 +818,10 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
     lv_obj_set_size(selector->completion_modal, 400, 200);
     lv_obj_center(selector->completion_modal);
     lv_obj_set_style_bg_color(selector->completion_modal, lv_color_hex(0x2c2c2c), 0);
-    lv_obj_set_style_border_color(selector->completion_modal, lv_color_hex(0x00aa00), 0);
-    lv_obj_set_style_border_width(selector->completion_modal, 3, 0);
+    // REMOVED: Border styles cause crash in LVGL's draw_border_complex()
+    // The border rendering code crashes when drawing complex borders on macOS
+    // lv_obj_set_style_border_color(selector->completion_modal, lv_color_hex(0x00aa00), 0);
+    // lv_obj_set_style_border_width(selector->completion_modal, 3, 0);
     lv_obj_set_style_radius(selector->completion_modal, 15, 0);
     lv_obj_add_flag(selector->completion_modal, LV_OBJ_FLAG_HIDDEN); // Initially hidden
 
@@ -743,6 +851,41 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
     return ESP_OK;
 }
 
+// Create and load firmware selector screen in one step (to avoid freeze)
+esp_err_t firmware_selector_create_and_load(firmware_selector_t* selector) {
+    if (!selector) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Creating and loading firmware selector in one step...");
+
+    // Initialize the selector
+    esp_err_t ret = firmware_selector_init(selector);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Scan directory
+    ret = firmware_selector_scan_directory(selector);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Create UI
+    ret = firmware_selector_create_ui(selector);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Loading firmware selector screen immediately...");
+    ESP_LOGI(TAG, "→ Before lv_screen_load() - screen object: %p", (void*)selector->screen);
+    lv_screen_load(selector->screen);
+    ESP_LOGI(TAG, "← After lv_screen_load() - screen loaded, returning");
+    ESP_LOGI(TAG, "Firmware selector screen loaded!");
+
+    return ESP_OK;
+}
+
 esp_err_t firmware_selector_show(firmware_selector_t* selector)
 {
     if (!selector || !selector->screen) {
@@ -762,7 +905,11 @@ esp_err_t firmware_selector_show(firmware_selector_t* selector)
         lv_obj_clear_flag(selector->progress_label, LV_OBJ_FLAG_HIDDEN);
     }
 
-    lv_scr_load(selector->screen);
+    // Load the new screen - this should trigger automatic redraw
+    lv_screen_load(selector->screen);
+
+    ESP_LOGI(TAG, "Firmware selection screen shown successfully");
+
     return ESP_OK;
 }
 
@@ -807,8 +954,8 @@ esp_err_t firmware_selector_toggle_selection(firmware_selector_t* selector, uint
         selector->total_selected_size -= fw->size;
     }
 
-    // Update UI
-    update_firmware_list_item(selector, index);
+    // Update UI - use text-only version to avoid LVGL border drawing crash
+    update_firmware_list_item_text_only(selector, index);
     update_buttons_state(selector);
 
     ESP_LOGI(TAG, "Toggled selection for %s: %s, Total selected: %d (%d bytes)",
@@ -835,7 +982,7 @@ esp_err_t firmware_selector_select_all(firmware_selector_t* selector)
             fw->is_selected = true;
             selector->selected_count++;
             selector->total_selected_size += fw->size;
-            update_firmware_list_item(selector, i);
+            update_firmware_list_item_text_only(selector, i);  // Safe text-only update
         }
     }
 
@@ -857,7 +1004,7 @@ esp_err_t firmware_selector_clear_selection(firmware_selector_t* selector)
 
     for (uint32_t i = 0; i < selector->firmware_count; i++) {
         selector->firmware_list[i].is_selected = false;
-        update_firmware_list_item(selector, i);
+        update_firmware_list_item_text_only(selector, i);  // Safe text-only update
     }
 
     selector->selected_count = 0;
@@ -934,9 +1081,24 @@ esp_err_t firmware_selector_cleanup(firmware_selector_t* selector)
 
     ESP_LOGI(TAG, "Cleaning up firmware selector");
 
-    // Note: LVGL objects will be cleaned up by LVGL when screen is destroyed
-    // Just reset our state
+    // CRITICAL: Delete the screen object to prevent memory leaks
+    // LVGL will automatically delete all child objects when the screen is deleted
+    if (selector->screen) {
+        ESP_LOGI(TAG, "Deleting firmware selector screen object: %p", (void*)selector->screen);
+
+        lv_obj_delete(selector->screen);
+        selector->screen = NULL;
+        ESP_LOGI(TAG, "Screen object deleted");
+    }
+
+    // Note: firmware_list is a static array, not a pointer, so don't free it
+    // Just reset the count
+    selector->firmware_count = 0;
+
+    // Reset our state
     memset(selector, 0, sizeof(firmware_selector_t));
+
+    ESP_LOGI(TAG, "Firmware selector cleanup complete");
 
     return ESP_OK;
 }

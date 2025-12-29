@@ -16,6 +16,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "soc/lp_system_reg.h"
+#include "soc_reg.h"
 #include "lvgl.h"
 #include "sd_ota.h"
 #include "freertos/FreeRTOS.h"
@@ -85,6 +86,64 @@ static void unlock_display(void)
     }
 }
 
+// Async screen load wrappers to avoid deadlocks
+static void async_show_firmware_selector(void *user_data) {
+    (void)user_data;
+    ESP_LOGI(TAG, "Async: Opening firmware selector...");
+
+    // Reuse a single static firmware selector to avoid memory leaks
+    // CRITICAL: Creating new screens every time without deleting old ones causes LVGL corruption
+    static firmware_selector_t selector = {0};
+    static bool selector_initialized = false;
+
+    extern esp_err_t firmware_selector_create_and_load(firmware_selector_t* selector);
+    extern esp_err_t firmware_selector_cleanup(firmware_selector_t* selector);
+
+    // Clean up previous screen if it exists
+    if (selector_initialized) {
+        ESP_LOGI(TAG, "Cleaning up previous firmware selector screen...");
+
+        // Switch to main screen BEFORE deleting the old selector screen
+        // This prevents LVGL from trying to render a deleted screen
+        ESP_LOGI(TAG, "Switching back to main screen before cleanup...");
+        lv_screen_load(screens[SCREEN_MAIN]);
+        current_screen = SCREEN_MAIN;
+
+        // Now safe to delete the old screen
+        firmware_selector_cleanup(&selector);
+        memset(&selector, 0, sizeof(firmware_selector_t));
+        selector_initialized = false;
+
+        ESP_LOGI(TAG, "Previous selector cleaned up");
+    }
+
+    esp_err_t ret = firmware_selector_create_and_load(&selector);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create and load firmware selector: %s", esp_err_to_name(ret));
+    } else {
+        selector_initialized = true;
+        ESP_LOGI(TAG, "✅ Firmware selector initialized and loaded successfully");
+    }
+}
+
+static void async_show_boot_menu(void *user_data) {
+    (void)user_data;
+    ESP_LOGI(TAG, "Async: Opening boot menu...");
+    show_boot_menu_screen();
+}
+
+static void async_switch_to_settings(void *user_data) {
+    (void)user_data;
+    ESP_LOGI(TAG, "Async: Switching to settings screen");
+    switch_screen(SCREEN_SETTINGS);
+}
+
+static void async_switch_to_main(void *user_data) {
+    (void)user_data;
+    ESP_LOGI(TAG, "Async: Switching to main screen");
+    switch_screen(SCREEN_MAIN);
+}
+
 // LVGL event callbacks
 static void demo_btn_event_cb(lv_event_t *e)
 {
@@ -95,24 +154,25 @@ static void demo_btn_event_cb(lv_event_t *e)
 
     switch(btn_id) {
         case 0:
-            // Select & Flash Firmware
-            ESP_LOGI(TAG, "Opening firmware selector...");
-            show_firmware_selector_screen();
+            // Select & Flash Firmware - defer to avoid deadlock
+            ESP_LOGI(TAG, "Scheduling firmware selector screen...");
+            lv_async_call(async_show_firmware_selector, NULL);
             break;
 
         case 1:
-            // Boot Menu - Show flashed applications
-            ESP_LOGI(TAG, "Opening boot menu...");
-            show_boot_menu_screen();
+            // Boot Menu - Show flashed applications - defer to avoid deadlock
+            ESP_LOGI(TAG, "Scheduling boot menu screen...");
+            lv_async_call(async_show_boot_menu, NULL);
             break;
 
         case 2:
-            // Settings
-            switch_screen(SCREEN_SETTINGS);
+            // Settings - defer to avoid deadlock
+            ESP_LOGI(TAG, "Scheduling settings screen...");
+            lv_async_call(async_switch_to_settings, NULL);
             break;
 
         case 3:
-            // Reboot to run application
+            // Reboot to run application (safe to call immediately)
             ESP_LOGI(TAG, "Rebooting system...");
             esp_restart();
             break;
@@ -122,7 +182,8 @@ static void demo_btn_event_cb(lv_event_t *e)
 static void back_btn_event_cb(lv_event_t *e)
 {
     ESP_LOGI(TAG, "Back button pressed");
-    switch_screen(SCREEN_MAIN);
+    // Defer screen switch to avoid deadlock
+    lv_async_call(async_switch_to_main, NULL);
 }
 
 // Screen management
@@ -472,6 +533,7 @@ void switch_screen(screen_id_t screen_id)
     }
 
     lv_screen_load(screens[screen_id]);
+
     current_screen = screen_id;
     ESP_LOGI(TAG, "Switched to screen %d", screen_id);
 }
@@ -760,11 +822,15 @@ esp_err_t show_boot_menu_screen(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    ESP_LOGI(TAG, "→ Before lv_obj_clean() boot menu");
     // Refresh the boot menu each time it's shown (in case firmware list changed)
     lv_obj_clean(screens[SCREEN_BOOT_MENU]);
+    ESP_LOGI(TAG, "→ Before create_boot_menu_screen()");
     create_boot_menu_screen();
-
+    ESP_LOGI(TAG, "→ Before lv_screen_load() boot menu");
     lv_screen_load(screens[SCREEN_BOOT_MENU]);
+    ESP_LOGI(TAG, "← After lv_screen_load() boot menu");
+
     current_screen = SCREEN_BOOT_MENU;
     ESP_LOGI(TAG, "Boot menu screen shown");
     return ESP_OK;
