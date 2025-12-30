@@ -1,7 +1,9 @@
-#include <stdbool.h>
 #ifndef SD_OTA_H
 #define SD_OTA_H
 
+#ifdef __SIMULATOR_BUILD__
+#include <stdbool.h>
+#endif
 #include "esp_err.h"
 #include "esp_partition.h"
 

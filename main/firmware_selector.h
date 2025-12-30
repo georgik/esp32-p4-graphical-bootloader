@@ -23,15 +23,7 @@ extern "C" {
 #define MAX_FIRMWARE_COUNT          16
 #define MAX_FILENAME_LENGTH         256
 #define MAX_DISPLAY_NAME_LENGTH     128
-
-#ifdef __SIMULATOR_BUILD__
-    // Simulator: use relative path in simulator directory
-    #define FIRMWARE_DIRECTORY          "sdcard/firmwares"
-#else
-    // Hardware: use absolute path on SD card
-    #define FIRMWARE_DIRECTORY          "/sdcard/firmwares"
-#endif
-
+#define FIRMWARE_DIRECTORY          "/sdcard/firmwares"
 #define FIRMWARE_EXTENSION          ".bin"
 
 // Firmware selection screen dimensions - optimized for 1024x600 display

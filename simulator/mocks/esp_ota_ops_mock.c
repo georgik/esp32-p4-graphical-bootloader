@@ -3,7 +3,7 @@
  * @brief Mock implementation of OTA operations
  */
 
-#include "main/esp_ota_ops.h"
+#include "esp_ota_ops.h"
 #include "esp_log_mock.h"
 #include <stdlib.h>
 #include <string.h>

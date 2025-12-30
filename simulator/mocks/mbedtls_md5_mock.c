@@ -3,8 +3,12 @@
  * @brief Mock implementation of mbedTLS MD5 using macOS CommonCrypto
  */
 
-#include "main/mbedtls/md5.h"
 #include <CommonCrypto/CommonDigest.h>
+#include <stdint.h>
+#include <stddef.h>
+
+// Type definitions for mbedTLS MD5 compatibility
+typedef CC_MD5_CTX mbedtls_md5_context;
 
 void mbedtls_md5_init(mbedtls_md5_context* ctx) {
     (void)ctx;

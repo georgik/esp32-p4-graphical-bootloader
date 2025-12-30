@@ -63,6 +63,7 @@ set(MOCK_SOURCES
     mocks/bsp_mock.c
     mocks/esp_ota_ops_mock.c
     mocks/mbedtls_md5_mock.c
+    mocks/sdmmc_mock.c
     mocks/firmware_flasher_mock.c
 )
 

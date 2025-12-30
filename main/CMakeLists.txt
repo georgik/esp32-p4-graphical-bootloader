@@ -9,7 +9,6 @@ idf_component_register(
         "firmware_validator.c"
         "partition_manager.c"
         "firmware_flasher.c"
-        "partition_visualizer.c"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES

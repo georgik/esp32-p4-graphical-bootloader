@@ -8,10 +8,11 @@
 #include "esp_ota_ops.h"
 #include "bsp/esp-bsp.h"
 #include "soc/lp_system_reg.h"
-#include "soc_reg.h"
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>
+#ifdef __SIMULATOR_BUILD__
+#include <stdlib.h>  // For malloc, free (only needed by simulator)
+#endif
 #include <sys/stat.h>
 #include <dirent.h>
 
