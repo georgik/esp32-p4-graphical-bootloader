@@ -16,6 +16,7 @@
 #include "esp_mock_header.h"
 #include "platform/lvgl_sdl_init.h"
 #include "platform/flash_builder.h"
+#include "platform/flash_emulator.h"
 
 // Bootloader headers
 #include "../main/lvgl_bootloader.h"
@@ -112,23 +113,38 @@ esp_err_t initialize_flash_image(void) {
         flash_builder_err_t ret = flash_builder_validate(flash_path);
         if (ret == FLASH_BUILDER_OK) {
             ESP_LOGI(TAG, "✅ Flash image validated");
-            return ESP_OK;
         } else {
             ESP_LOGW(TAG, "Flash image validation failed, will recreate");
+            // Recreate flash image
+            flash_builder_err_t ret = flash_builder_create(flash_path, build_dir);
+            if (ret != FLASH_BUILDER_OK) {
+                ESP_LOGE(TAG, "Failed to create flash image: %d", ret);
+                return ESP_FAIL;
+            }
         }
+    } else {
+        // Create flash image from ESP-IDF build artifacts
+        ESP_LOGI(TAG, "Creating flash image from ESP-IDF build directory...");
+        ESP_LOGI(TAG, "  Build directory: %s", build_dir);
+
+        flash_builder_err_t ret = flash_builder_create(flash_path, build_dir);
+        if (ret != FLASH_BUILDER_OK) {
+            ESP_LOGE(TAG, "Failed to create flash image: %d", ret);
+            return ESP_FAIL;
+        }
+
+        ESP_LOGI(TAG, "✅ Flash image created successfully");
     }
 
-    // Create flash image from ESP-IDF build artifacts
-    ESP_LOGI(TAG, "Creating flash image from ESP-IDF build directory...");
-    ESP_LOGI(TAG, "  Build directory: %s", build_dir);
-
-    flash_builder_err_t ret = flash_builder_create(flash_path, build_dir);
-    if (ret != FLASH_BUILDER_OK) {
-        ESP_LOGE(TAG, "Failed to create flash image: %d", ret);
-        return ESP_FAIL;
+    // Initialize flash emulator with mmap
+    ESP_LOGI(TAG, "Initializing flash emulator...");
+    esp_err_t ret = flash_emulator_init(flash_path);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize flash emulator: %s", esp_err_to_name(ret));
+        return ret;
     }
 
-    ESP_LOGI(TAG, "✅ Flash image created successfully");
+    ESP_LOGI(TAG, "✅ Flash emulator ready");
     return ESP_OK;
 }
 
@@ -225,6 +241,9 @@ void cleanup(void) {
 
     // Cleanup SDL resources
     lvgl_sdl_cleanup();
+
+    // Cleanup flash emulator
+    flash_emulator_deinit();
 
     // NVS is automatically saved on modification
 

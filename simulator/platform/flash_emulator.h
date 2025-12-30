@@ -1,6 +1,6 @@
 /**
  * @file flash_emulator.h
- * @brief Flash write emulation with visualization callbacks
+ * @brief Flash write emulation with visualization callbacks and mmap support
  */
 
 #ifndef FLASH_EMULATOR_H
@@ -9,6 +9,7 @@
 #include "esp_system_mock.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +45,60 @@ typedef struct {
 
 void flash_emulator_get_stats(flash_stats_t* stats);
 void flash_emulator_reset_stats(void);
+
+/**
+ * @brief Initialize flash emulator with mmap
+ *
+ * Maps the simulated-flash.bin file into memory for fast access.
+ * Must be called before any read/write operations.
+ *
+ * @param flash_path Path to flash image file (e.g., "simulated-flash.bin")
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t flash_emulator_init(const char* flash_path);
+
+/**
+ * @brief Cleanup flash emulator
+ *
+ * Unmaps the flash image and closes file descriptors.
+ */
+void flash_emulator_deinit(void);
+
+/**
+ * @brief Check if flash emulator is initialized
+ *
+ * @return true if initialized, false otherwise
+ */
+bool flash_emulator_is_initialized(void);
+
+/**
+ * @brief Read from flash image
+ *
+ * @param offset Offset in bytes from start of flash
+ * @param buffer Output buffer
+ * @param size Number of bytes to read
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t flash_emulator_read(uint32_t offset, void* buffer, size_t size);
+
+/**
+ * @brief Write to flash image
+ *
+ * @param offset Offset in bytes from start of flash
+ * @param data Input data
+ * @param size Number of bytes to write
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t flash_emulator_write(uint32_t offset, const void* data, size_t size);
+
+/**
+ * @brief Erase region of flash (fill with 0xFF)
+ *
+ * @param offset Offset in bytes from start of flash
+ * @param size Number of bytes to erase
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t flash_emulator_erase(uint32_t offset, size_t size);
 
 // Simulate flash write with progress tracking
 esp_err_t flash_emulator_write_partition(

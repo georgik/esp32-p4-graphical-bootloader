@@ -1,10 +1,11 @@
 /**
  * @file esp_partition_mock.c
- * @brief Mock implementation of ESP partition operations with file backing
+ * @brief Mock implementation of ESP partition operations using flash emulator
  */
 
 #include "esp_partition_mock.h"
 #include "esp_log_mock.h"
+#include "../platform/flash_emulator.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,20 +73,6 @@ static const esp_partition_t mock_partitions[] = {
 
 #define PARTITION_COUNT (sizeof(mock_partitions) / sizeof(mock_partitions[0]))
 
-// Flash data directory
-#define FLASH_DATA_DIR ".esp32-simulator/flash"
-
-// Ensure flash data directory exists
-static void ensure_flash_dir(void) {
-    mkdir(".esp32-simulator", 0755);
-    mkdir(FLASH_DATA_DIR, 0755);
-}
-
-// Get filename for partition data
-static void get_partition_filename(const esp_partition_t* partition, char* filename, size_t max_len) {
-    snprintf(filename, max_len, "%s/0x%08x.bin", FLASH_DATA_DIR, partition->address);
-}
-
 const esp_partition_t* esp_partition_find_first(
     esp_partition_type_t type,
     esp_partition_subtype_t subtype,
@@ -148,38 +135,20 @@ esp_err_t esp_partition_read(
         return ESP_ERR_INVALID_SIZE;
     }
 
-    ensure_flash_dir();
+    // Calculate absolute flash address
+    uint32_t flash_addr = partition->address + src_offset;
 
-    char filename[256];
-    get_partition_filename(partition, filename, sizeof(filename));
+    // Read from flash emulator
+    esp_err_t ret = flash_emulator_read(flash_addr, dst, size);
 
-    FILE* f = fopen(filename, "rb");
-    if (!f) {
-        // File doesn't exist yet, return zeros
-        ESP_LOGD(TAG, "Partition file not found, returning zeros: %s", filename);
-        memset(dst, 0xFF, size);  // Flash defaults to 0xFF
-        return ESP_OK;
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read from flash emulator @ 0x%x", flash_addr);
+        return ret;
     }
 
-    // Seek to offset
-    if (fseek(f, src_offset, SEEK_SET) != 0) {
-        ESP_LOGE(TAG, "Failed to seek in partition file");
-        fclose(f);
-        return ESP_FAIL;
-    }
+    ESP_LOGD(TAG, "Read partition %s @ 0x%x (flash @ 0x%x), size %zu bytes",
+             partition->label, (unsigned int)src_offset, flash_addr, size);
 
-    // Read data
-    size_t bytes_read = fread(dst, 1, size, f);
-    fclose(f);
-
-    if (bytes_read != size) {
-        // If we couldn't read enough, pad with 0xFF
-        ESP_LOGD(TAG, "Partial read: %zu/%zu bytes, padding with 0xFF", bytes_read, size);
-        memset((uint8_t*)dst + bytes_read, 0xFF, size - bytes_read);
-    }
-
-    ESP_LOGD(TAG, "Read partition %s @ 0x%x, size %zu bytes",
-             partition->label, (unsigned int)src_offset, size);
     return ESP_OK;
 }
 
@@ -200,45 +169,20 @@ esp_err_t esp_partition_write(
         return ESP_ERR_INVALID_SIZE;
     }
 
-    ensure_flash_dir();
+    // Calculate absolute flash address
+    uint32_t flash_addr = partition->address + dst_offset;
 
-    char filename[256];
-    get_partition_filename(partition, filename, sizeof(filename));
+    // Write to flash emulator
+    esp_err_t ret = flash_emulator_write(flash_addr, src, size);
 
-    // Open file for reading/writing
-    FILE* f = fopen(filename, "r+b");
-    if (!f) {
-        // Create new file
-        f = fopen(filename, "wb");
-        if (!f) {
-            ESP_LOGE(TAG, "Failed to create partition file: %s", filename);
-            return ESP_FAIL;
-        }
-
-        // Pre-allocate file size
-        fseek(f, partition->size - 1, SEEK_SET);
-        fputc(0xFF, f);
-        fseek(f, 0, SEEK_SET);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write to flash emulator @ 0x%x", flash_addr);
+        return ret;
     }
 
-    // Seek to offset
-    if (fseek(f, dst_offset, SEEK_SET) != 0) {
-        ESP_LOGE(TAG, "Failed to seek in partition file");
-        fclose(f);
-        return ESP_FAIL;
-    }
+    ESP_LOGI(TAG, "✍️  Wrote partition %s @ 0x%x (flash @ 0x%x), size %zu bytes",
+             partition->label, (unsigned int)dst_offset, flash_addr, size);
 
-    // Write data
-    size_t bytes_written = fwrite(src, 1, size, f);
-    fclose(f);
-
-    if (bytes_written != size) {
-        ESP_LOGE(TAG, "Failed to write complete data: %zu/%zu bytes", bytes_written, size);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "✍️  Wrote partition %s @ 0x%x, size %zu bytes",
-             partition->label, (unsigned int)dst_offset, size);
     return ESP_OK;
 }
 
@@ -252,34 +196,26 @@ esp_err_t esp_partition_erase_range(
         return ESP_ERR_INVALID_ARG;
     }
 
-    ensure_flash_dir();
-
-    char filename[256];
-    get_partition_filename(partition, filename, sizeof(filename));
-
-    // Create/overwrite file with 0xFF (erased flash state)
-    FILE* f = fopen(filename, "r+b");
-    if (!f) {
-        f = fopen(filename, "wb");
+    if (start_addr + size > partition->size) {
+        ESP_LOGE(TAG, "Erase out of bounds: offset=0x%x, size=0x%x, partition_size=0x%x",
+                 (unsigned int)start_addr, (unsigned int)size, (unsigned int)partition->size);
+        return ESP_ERR_INVALID_SIZE;
     }
 
-    if (!f) {
-        ESP_LOGE(TAG, "Failed to open partition file for erase");
-        return ESP_FAIL;
+    // Calculate absolute flash address
+    uint32_t flash_addr = partition->address + start_addr;
+
+    // Erase in flash emulator
+    esp_err_t ret = flash_emulator_erase(flash_addr, size);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to erase flash emulator @ 0x%x", flash_addr);
+        return ret;
     }
 
-    // Seek to start
-    fseek(f, start_addr, SEEK_SET);
+    ESP_LOGI(TAG, "🧹 Erased partition %s @ 0x%x (flash @ 0x%x), size %zu bytes",
+             partition->label, (unsigned int)start_addr, flash_addr, size);
 
-    // Write 0xFF for erased bytes
-    uint8_t* erase_buffer = calloc(size, 1);
-    memset(erase_buffer, 0xFF, size);
-    fwrite(erase_buffer, 1, size, f);
-    free(erase_buffer);
-    fclose(f);
-
-    ESP_LOGI(TAG, "🧹 Erased partition %s @ 0x%x, size %zu bytes",
-             partition->label, (unsigned int)start_addr, size);
     return ESP_OK;
 }
 
