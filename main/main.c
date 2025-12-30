@@ -21,6 +21,7 @@
 #include "vdma_protection.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "firmware_metadata.h"
 
 static const char *TAG = "main";
 
@@ -150,6 +151,18 @@ static esp_err_t initialize_system(void)
         // Continue without NVS - firmware list won't persist
     } else {
         ESP_LOGI(TAG, "NVS initialized successfully");
+
+        // Initialize firmware metadata module
+        ret = firmware_metadata_init();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to initialize firmware metadata: %s", esp_err_to_name(ret));
+            // Continue anyway - metadata is optional
+        } else {
+            ESP_LOGI(TAG, "Firmware metadata initialized");
+
+            // Print existing firmware metadata on boot
+            firmware_metadata_print_all();
+        }
     }
 
     // Initialize BSP (includes LVGL initialization)

@@ -7,6 +7,7 @@
 #include "partition_manager.h"
 #include "firmware_validator.h"
 #include "firmware_selector.h"
+#include "firmware_metadata.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_flash.h"
@@ -54,7 +55,6 @@ static esp_err_t write_partition_table_data(const uint8_t* buffer, size_t size);
 static void hexdump_and_verify_partition_table(size_t expected_size, const uint8_t* expected_buffer);
 static esp_err_t backup_partition_table(void);
 static esp_err_t verify_all_firmwares(void);
-static esp_err_t verify_flashed_data(const esp_partition_t* partition, firmware_info_t* firmware);
 static void update_statistics(void);
 static void notify_progress(uint32_t current_firmware, uint32_t current_progress, const char* message);
 static void notify_status(flash_state_t state, flash_result_t result, const char* message);
@@ -650,6 +650,63 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
             return ret;
         }
         ESP_LOGI(TAG, "Firmware verification successful");
+    }
+
+    // Store firmware metadata in NVS
+    ESP_LOGI(TAG, "Storing firmware metadata in NVS...");
+    firmware_metadata_t metadata;
+    memset(&metadata, 0, sizeof(metadata));
+
+    // Extract filename from path
+    const char* filename = firmware->file_path;
+    const char* last_slash = strrchr(firmware->file_path, '/');
+    if (last_slash) {
+        filename = last_slash + 1;
+    }
+
+    // Safely copy filename with explicit truncation check
+    size_t filename_len = strlen(filename);
+    if (filename_len >= sizeof(metadata.filename)) {
+        ESP_LOGW(TAG, "Filename truncated for metadata: %s (len=%zu)", filename, filename_len);
+        filename_len = sizeof(metadata.filename) - 1;
+    }
+    memcpy(metadata.filename, filename, filename_len);
+    metadata.filename[filename_len] = '\0';
+
+    // Safely copy partition name with explicit truncation check
+    size_t partition_len = strlen(ota_partition->label);
+    if (partition_len >= sizeof(metadata.partition)) {
+        ESP_LOGW(TAG, "Partition name truncated: %s (len=%zu)", ota_partition->label, partition_len);
+        partition_len = sizeof(metadata.partition) - 1;
+    }
+    memcpy(metadata.partition, ota_partition->label, partition_len);
+    metadata.partition[partition_len] = '\0';
+
+    // Store offset and size
+    metadata.offset = ota_partition->address;
+    metadata.size = firmware->size;
+
+    // Calculate CRC32
+    ret = firmware_calculate_crc32(firmware->file_path, &metadata.crc32);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to calculate CRC32 for metadata");
+        metadata.crc32 = 0;
+    }
+
+    // Mark as valid (passed verification if enabled)
+    metadata.is_valid = true;
+
+    // Store metadata at firmware_index
+    ret = firmware_metadata_set(firmware_index, &metadata);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to store firmware metadata: %s", esp_err_to_name(ret));
+        // Continue anyway - metadata storage is not critical
+    } else {
+        // Update firmware count
+        ret = firmware_metadata_set_count(firmware_index + 1);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to update firmware count: %s", esp_err_to_name(ret));
+        }
     }
 
     return ESP_OK;
