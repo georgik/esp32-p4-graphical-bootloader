@@ -51,6 +51,7 @@ set(SIMULATOR_SOURCES
     main.c
     platform/lvgl_sdl_init.c
     platform/flash_emulator.c
+    platform/flash_builder.c
 )
 
 # Mock sources

@@ -15,6 +15,7 @@
 // Mock headers - MUST be included before ESP-IDF headers
 #include "esp_mock_header.h"
 #include "platform/lvgl_sdl_init.h"
+#include "platform/flash_builder.h"
 
 // Bootloader headers
 #include "../main/lvgl_bootloader.h"
@@ -91,9 +92,44 @@ void print_usage(void) {
     printf("  • Press Ctrl+C to exit\n");
     printf("\n");
     printf("Data Storage:\n");
-    printf("  • Flash partitions: .esp32-simulator/flash/\n");
-    printf("  • NVS storage:     .esp32-simulator/nvs.json\n");
+    printf("  • Flash image:      simulated-flash.bin\n");
+    printf("  • NVS storage:      .esp32-simulator/nvs.json\n");
     printf("\n");
+}
+
+// Initialize flash image
+esp_err_t initialize_flash_image(void) {
+    ESP_LOGI(TAG, "=== Initializing Flash Image ===");
+
+    const char* flash_path = "simulated-flash.bin";
+    const char* build_dir = "../build/";
+
+    // Check if flash image exists
+    if (flash_builder_exists(flash_path)) {
+        ESP_LOGI(TAG, "Flash image already exists: %s", flash_path);
+
+        // Validate existing flash image
+        flash_builder_err_t ret = flash_builder_validate(flash_path);
+        if (ret == FLASH_BUILDER_OK) {
+            ESP_LOGI(TAG, "✅ Flash image validated");
+            return ESP_OK;
+        } else {
+            ESP_LOGW(TAG, "Flash image validation failed, will recreate");
+        }
+    }
+
+    // Create flash image from ESP-IDF build artifacts
+    ESP_LOGI(TAG, "Creating flash image from ESP-IDF build directory...");
+    ESP_LOGI(TAG, "  Build directory: %s", build_dir);
+
+    flash_builder_err_t ret = flash_builder_create(flash_path, build_dir);
+    if (ret != FLASH_BUILDER_OK) {
+        ESP_LOGE(TAG, "Failed to create flash image: %d", ret);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "✅ Flash image created successfully");
+    return ESP_OK;
 }
 
 // Initialize system
@@ -232,8 +268,15 @@ int main(int argc, char** argv) {
     signal(SIGFPE, crash_handler);
     signal(SIGABRT, crash_handler);
 
+    // Initialize flash image
+    esp_err_t ret = initialize_flash_image();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Flash image initialization failed: %s", esp_err_to_name(ret));
+        return 1;
+    }
+
     // Initialize simulator
-    esp_err_t ret = initialize_simulator();
+    ret = initialize_simulator();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Simulator initialization failed: %s", esp_err_to_name(ret));
         return 1;
