@@ -22,6 +22,7 @@ static const esp_partition_t mock_partitions[] = {
         .size = 0x6000,
         .label = "nvs",
         .flags = 0,
+        .encrypted = false,
         .next = NULL
     },
     {
@@ -31,6 +32,7 @@ static const esp_partition_t mock_partitions[] = {
         .size = 0x1000,
         .label = "phy_init",
         .flags = 0,
+        .encrypted = false,
         .next = NULL
     },
     {
@@ -40,6 +42,7 @@ static const esp_partition_t mock_partitions[] = {
         .size = 0x100000,
         .label = "factory",
         .flags = 0,
+        .encrypted = false,
         .next = NULL
     },
     {
@@ -49,6 +52,7 @@ static const esp_partition_t mock_partitions[] = {
         .size = 0x4C0000,
         .label = "ota_0",
         .flags = 0,
+        .encrypted = false,
         .next = NULL
     },
     {
@@ -58,6 +62,7 @@ static const esp_partition_t mock_partitions[] = {
         .size = 0x400000,
         .label = "ota_1",
         .flags = 0,
+        .encrypted = false,
         .next = NULL
     },
     {
@@ -67,6 +72,7 @@ static const esp_partition_t mock_partitions[] = {
         .size = 0x400000,
         .label = "ota_2",
         .flags = 0,
+        .encrypted = false,
         .next = NULL
     },
 };

@@ -65,7 +65,8 @@ set(MOCK_SOURCES
     mocks/esp_ota_ops_mock.c
     mocks/mbedtls_md5_mock.c
     mocks/sdmmc_mock.c
-    mocks/firmware_flasher_mock.c
+    mocks/esp_flash_mock.c
+    # Removed: mocks/firmware_flasher_mock.c - using real firmware_flasher.c instead
     mocks/vfs_mock.c
 )
 
@@ -77,7 +78,7 @@ set(BOOTLOADER_SOURCES
     ../main/firmware_validator.c
     ../main/partition_manager.c
     ../main/sd_ota.c
-    # Skip firmware_flasher.c for initial UI testing
+    ../main/firmware_flasher.c  # Now using real firmware flasher with flash emulator
 )
 
 # Collect all LVGL source files

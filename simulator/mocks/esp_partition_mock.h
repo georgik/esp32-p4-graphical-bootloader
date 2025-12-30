@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include "esp_system_mock.h"
 
 #ifdef __cplusplus
@@ -43,6 +44,9 @@ typedef enum {
     ESP_PARTITION_SUBTYPE_ANY = 0xff,
 } esp_partition_subtype_t;
 
+// Partition flags
+#define PART_FLAG_ENCRYPTED 0x1  // Partition is encrypted
+
 // Partition structure
 typedef struct esp_partition_t {
     esp_partition_type_t type;
@@ -52,6 +56,7 @@ typedef struct esp_partition_t {
     uint32_t erased_size;
     char label[17];
     uint32_t flags;
+    bool encrypted;  // Encryption flag (needed by firmware_flasher.c)
     struct esp_partition_t* next;
 } esp_partition_t;
 

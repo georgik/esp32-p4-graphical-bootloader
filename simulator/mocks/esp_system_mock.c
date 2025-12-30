@@ -40,12 +40,4 @@ uint32_t esp_crc32_le(uint32_t crc, const uint8_t* buf, uint32_t len) {
     return (uint32_t)result;
 }
 
-// ESP flash read function
-esp_err_t esp_flash_read(void* chip, void* dst, size_t src_addr, size_t size) {
-    (void)chip;
-    (void)dst;
-    (void)src_addr;
-    (void)size;
-    // Mock implementation - in real hardware this would read from flash
-    return ESP_OK;
-}
+// Note: esp_flash functions are now in esp_flash_mock.c with flash emulator support
