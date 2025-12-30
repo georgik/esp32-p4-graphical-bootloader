@@ -229,6 +229,8 @@ esp_err_t esp_partition_get_sha256(
     const esp_partition_t* partition,
     uint8_t* sha256_out) {
 
+    (void)partition;  // Unused
+
     // Simplified: just return zeros
     // In real implementation, would calculate SHA256 of partition
     memset(sha256_out, 0, 32);
@@ -237,4 +239,86 @@ esp_err_t esp_partition_get_sha256(
 
 uint32_t esp_partition_get_flash_size(const esp_partition_t* partition) {
     return partition ? partition->size : 0;
+}
+
+// ============================================================================
+// Partition Iterator Implementation
+// ============================================================================
+
+// Iterator structure
+struct esp_partition_iterator {
+    const esp_partition_t* current;
+    size_t index;
+};
+
+esp_partition_iterator_t esp_partition_find(esp_partition_type_t type,
+                                           esp_partition_subtype_t subtype,
+                                           const char* label) {
+    // Create iterator
+    struct esp_partition_iterator* it = malloc(sizeof(struct esp_partition_iterator));
+    if (!it) {
+        ESP_LOGE(TAG, "Failed to allocate partition iterator");
+        return NULL;
+    }
+
+    // Find first matching partition
+    for (size_t i = 0; i < PARTITION_COUNT; i++) {
+        const esp_partition_t* part = &mock_partitions[i];
+
+        // Check type
+        if (type != ESP_PARTITION_TYPE_ANY && part->type != type) {
+            continue;
+        }
+
+        // Check subtype
+        if (subtype != ESP_PARTITION_SUBTYPE_ANY && part->subtype != subtype) {
+            continue;
+        }
+
+        // Check label
+        if (label != NULL && strcmp(part->label, label) != 0) {
+            continue;
+        }
+
+        // Found match
+        it->current = part;
+        it->index = i;
+        ESP_LOGI(TAG, "Partition iterator created: %s", part->label);
+        return (esp_partition_iterator_t)it;
+    }
+
+    // No match found - return iterator that will return NULL
+    it->current = NULL;
+    it->index = 0;
+    return (esp_partition_iterator_t)it;
+}
+
+const esp_partition_t* esp_partition_get(esp_partition_iterator_t iterator) {
+    if (!iterator) {
+        return NULL;
+    }
+
+    struct esp_partition_iterator* it = (struct esp_partition_iterator*)iterator;
+
+    // Return current partition
+    const esp_partition_t* current = it->current;
+
+    // Move to next partition
+    if (it->current != NULL) {
+        it->index++;
+        if (it->index < PARTITION_COUNT) {
+            it->current = &mock_partitions[it->index];
+        } else {
+            it->current = NULL;  // End of list
+        }
+    }
+
+    return current;
+}
+
+void esp_partition_iterator_release(esp_partition_iterator_t iterator) {
+    if (iterator) {
+        ESP_LOGD(TAG, "Partition iterator released");
+        free(iterator);
+    }
 }

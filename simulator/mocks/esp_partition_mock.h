@@ -21,6 +21,7 @@ typedef enum {
     ESP_PARTITION_TYPE_DATA = 0x01,
     ESP_PARTITION_TYPE_USER = 0x40,
     ESP_PARTITION_TYPE_CUSTOM = 0x41,
+    ESP_PARTITION_TYPE_ANY = 0xFF,  // Wildcard for searching
 } esp_partition_type_t;
 
 // Partition subtypes
@@ -116,6 +117,17 @@ esp_err_t esp_partition_get_sha256(
 
 // Flash operations
 uint32_t esp_partition_get_flash_size(const esp_partition_t* partition);
+
+// Partition iterator (for iterating through all partitions)
+typedef struct esp_partition_iterator* esp_partition_iterator_t;
+
+esp_partition_iterator_t esp_partition_find(esp_partition_type_t type,
+                                           esp_partition_subtype_t subtype,
+                                           const char* label);
+
+const esp_partition_t* esp_partition_get(esp_partition_iterator_t iterator);
+
+void esp_partition_iterator_release(esp_partition_iterator_t iterator);
 
 #ifdef __cplusplus
 }

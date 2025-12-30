@@ -8,6 +8,7 @@
 #include "partition_manager.h"
 #include "firmware_flasher.h"
 #include "lvgl_bootloader.h"
+#include "partition_visualizer.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_vfs_fat.h"
@@ -39,6 +40,7 @@ firmware_selector_t* g_active_firmware_selector = NULL;
 static void fw_selector_list_event_cb(lv_event_t* e);
 static void fw_selector_select_all_cb(lv_event_t* e);
 static void fw_selector_clear_cb(lv_event_t* e);
+static void fw_selector_view_partitions_cb(lv_event_t* e);
 static void fw_selector_flash_cb(lv_event_t* e);
 static void fw_selector_back_cb(lv_event_t* e);
 static void fw_selector_modal_ok_cb(lv_event_t* e);
@@ -192,6 +194,16 @@ static void fw_selector_clear_cb(lv_event_t* e)
     if (selector) {
         firmware_selector_clear_selection(selector);
     }
+}
+
+static void fw_selector_view_partitions_cb(lv_event_t* e)
+{
+    ESP_LOGI(TAG, "View Partitions button clicked");
+
+    (void)e;  // Unused
+
+    // Show partition visualizer
+    partition_visualizer_show();
 }
 
 static void fw_selector_flash_cb(lv_event_t* e)
@@ -710,6 +722,16 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
     lv_obj_add_event_cb(selector->clear_btn, fw_selector_clear_cb, LV_EVENT_CLICKED, selector);
     label = lv_label_create(selector->clear_btn);
     lv_label_set_text(label, "Clear");
+    lv_obj_center(label);
+
+    // View Partitions button
+    lv_obj_t* view_parts_btn = lv_btn_create(btn_cont);
+    lv_obj_set_size(view_parts_btn, 120, FW_BUTTON_HEIGHT);
+    lv_obj_align(view_parts_btn, LV_ALIGN_LEFT_MID, 310, 0);
+    lv_obj_add_event_cb(view_parts_btn, fw_selector_view_partitions_cb, LV_EVENT_CLICKED, selector);
+    lv_obj_set_style_bg_color(view_parts_btn, lv_color_hex(0x2196F3), 0);
+    label = lv_label_create(view_parts_btn);
+    lv_label_set_text(label, "View Parts");
     lv_obj_center(label);
 
     // Flash button - larger and more prominent

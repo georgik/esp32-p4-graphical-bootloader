@@ -79,6 +79,7 @@ set(BOOTLOADER_SOURCES
     ../main/partition_manager.c
     ../main/sd_ota.c
     ../main/firmware_flasher.c  # Now using real firmware flasher with flash emulator
+    ../main/partition_visualizer.c  # Partition table visualizer
 )
 
 # Collect all LVGL source files
