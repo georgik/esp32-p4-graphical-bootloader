@@ -65,6 +65,7 @@ set(MOCK_SOURCES
     mocks/mbedtls_md5_mock.c
     mocks/sdmmc_mock.c
     mocks/firmware_flasher_mock.c
+    mocks/vfs_mock.c
 )
 
 # Bootloader sources (reuse existing code)

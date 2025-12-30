@@ -20,6 +20,9 @@
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#ifdef __SIMULATOR_BUILD__
+#include "vfs_mock.h"  // For path translation - MUST be after system headers
+#endif
 
 static const char* TAG = "firmware_selector";
 
@@ -161,20 +164,18 @@ esp_err_t firmware_selector_scan_directory(firmware_selector_t* selector)
 
 static void fw_selector_list_event_cb(lv_event_t* e)
 {
-    lv_obj_t* obj = lv_event_get_target(e);
-    firmware_selector_t* selector = (firmware_selector_t*)lv_event_get_user_data(e);
+    // Extract firmware index from user data (passed as uintptr_t cast to void*)
+    uint32_t firmware_idx = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
 
-    if (!selector) {
+    // Get the active selector from global reference
+    extern firmware_selector_t* g_active_firmware_selector;
+    if (!g_active_firmware_selector) {
+        ESP_LOGE("firmware_selector", "No active firmware selector");
         return;
     }
 
-    // Find firmware index
-    for (uint32_t i = 0; i < selector->firmware_count; i++) {
-        if (selector->firmware_list[i].list_item == obj) {
-            firmware_selector_toggle_selection(selector, i);
-            break;
-        }
-    }
+    // Toggle selection for this firmware
+    firmware_selector_toggle_selection(g_active_firmware_selector, firmware_idx);
 }
 
 static void fw_selector_select_all_cb(lv_event_t* e)
@@ -595,16 +596,30 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0); // Larger font
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
 
-    // Create firmware list - optimized for 1024px width
-    selector->list = lv_list_create(selector->screen);
-    lv_obj_set_size(selector->list, FW_SELECTOR_SCREEN_WIDTH - 40, FW_LIST_HEIGHT); // More padding
-    lv_obj_align(selector->list, LV_ALIGN_TOP_MID, 0, 60); // More space for title
-    lv_obj_set_style_bg_color(selector->list, lv_color_hex(0xf5f5f5), 0); // Light gray background
-    lv_obj_set_style_border_width(selector->list, 2, 0);
-    lv_obj_set_style_border_color(selector->list, lv_color_hex(0xcccccc), 0);
+    // Create custom scrollable firmware list using flexbox (lv_list causes freeze on macOS)
+    // Create scrollable container with flexbox layout
+    selector->list = lv_obj_create(selector->screen);
+
+    // Set size FIRST before adding any children (prevents LVGL freeze)
+    lv_obj_set_size(selector->list, FW_SELECTOR_SCREEN_WIDTH - 40, FW_LIST_HEIGHT);
+    lv_obj_align(selector->list, LV_ALIGN_TOP_MID, 0, 60);
+
+    // Set up flexbox layout for vertical list
+    lv_obj_set_layout(selector->list, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(selector->list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(selector->list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    // Enable scrolling
+    lv_obj_set_scrollbar_mode(selector->list, LV_SCROLLBAR_MODE_AUTO);
+
+    // Style the container - CRITICAL: Disable borders to prevent macOS crash
+    lv_obj_set_style_bg_color(selector->list, lv_color_hex(0xf5f5f5), 0);
+    lv_obj_set_style_border_width(selector->list, 0, 0);           // CRITICAL: No borders
+    lv_obj_set_style_border_opa(selector->list, LV_OPA_TRANSP, 0); // CRITICAL: Transparent
+    lv_obj_set_style_pad_all(selector->list, 5, 0);
     lv_obj_set_style_radius(selector->list, 10, 0); // Rounded corners
 
-    // Add firmware items to list - with small delays to prevent LVGL overload
+    // Add firmware items to list - using custom buttons (not lv_list_add_btn)
     ESP_LOGI(TAG, "Adding %lu firmware items to list...", (unsigned long)selector->firmware_count);
 
     for (uint32_t i = 0; i < selector->firmware_count; i++) {
@@ -612,20 +627,30 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
 
         ESP_LOGD(TAG, "Adding firmware %lu: %s", (unsigned long)i, fw->display_name);
 
-        // Create list item with simple name first
-        lv_obj_t* btn = lv_list_add_btn(selector->list, LV_SYMBOL_FILE, fw->display_name);
-        if (!btn) {
-            ESP_LOGE(TAG, "Failed to create list button for firmware %lu", (unsigned long)i);
-            continue;
-        }
+        // Create button - CRITICAL: Follow macOS LVGL guidelines
+        lv_obj_t* btn = lv_btn_create(selector->list);
+        lv_obj_set_size(btn, FW_SELECTOR_SCREEN_WIDTH - 60, 50);
+
+        // CRITICAL: Disable borders FIRST before any other operations (prevents crash)
+        lv_obj_set_style_border_width(btn, 0, 0);
+        lv_obj_set_style_border_opa(btn, LV_OPA_TRANSP, 0);
+
+        // Set background color
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0xffffff), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+
+        // Create label for firmware name
+        lv_obj_t* label = lv_label_create(btn);
+        lv_label_set_text(label, fw->display_name);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL);
+        lv_obj_set_style_text_color(label, lv_color_hex(0x333333), 0);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+        lv_obj_align(label, LV_ALIGN_LEFT_MID, 10, 0);
+
+        // Add click callback with user data pointing to firmware index
+        lv_obj_add_event_cb(btn, fw_selector_list_event_cb, LV_EVENT_CLICKED, (void*)(uintptr_t)i);
 
         fw->list_item = btn;
-
-        // Set click callback
-        lv_obj_add_event_cb(btn, fw_selector_list_event_cb, LV_EVENT_CLICKED, selector);
-
-        // Update item display after creation
-        update_firmware_list_item(selector, i);
 
         // Small delay every few items to let LVGL breathe
         if (i % 5 == 0) {
