@@ -14,9 +14,9 @@
 
 static const char* TAG = "partition_visualizer";
 
-// Screen dimensions
-#define PV_SCREEN_WIDTH    320
-#define PV_SCREEN_HEIGHT   480
+// Screen dimensions (matching firmware selector)
+#define PV_SCREEN_WIDTH    1024
+#define PV_SCREEN_HEIGHT   600
 
 // UI Constants
 #define PV_HEADER_HEIGHT   60
@@ -354,9 +354,9 @@ lv_obj_t* partition_visualizer_create_screen(void) {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 10, 0);
 
-    // Partition list (scrollable)
+    // Partition list (scrollable) - match firmware selector width style
     pv_list = lv_obj_create(screen);
-    lv_obj_set_size(pv_list, PV_SCREEN_WIDTH - 2 * PV_MARGIN, PV_LIST_HEIGHT);
+    lv_obj_set_size(pv_list, PV_SCREEN_WIDTH - 40, PV_LIST_HEIGHT);
     lv_obj_align(pv_list, LV_ALIGN_TOP_MID, 0, PV_HEADER_HEIGHT + PV_MARGIN);
     lv_obj_set_layout(pv_list, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(pv_list, LV_FLEX_FLOW_COLUMN);
@@ -391,9 +391,9 @@ lv_obj_t* partition_visualizer_create_screen(void) {
 
     ESP_LOGI(TAG, "Total partitions displayed: %u", count);
 
-    // Button bar
+    // Button bar - match firmware selector width style
     lv_obj_t* button_bar = lv_obj_create(screen);
-    lv_obj_set_size(button_bar, PV_SCREEN_WIDTH - 2 * PV_MARGIN, PV_BUTTON_HEIGHT);
+    lv_obj_set_size(button_bar, PV_SCREEN_WIDTH - 40, PV_BUTTON_HEIGHT);
     lv_obj_align(button_bar, LV_ALIGN_BOTTOM_MID, 0, -PV_MARGIN);
     lv_obj_set_style_bg_opa(button_bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(button_bar, 0, 0);

@@ -31,6 +31,7 @@ typedef int esp_err_t;
 #define ESP_ERR_NVS_NO_FREE_PAGES 0x112  // NVS no free pages
 #define ESP_ERR_NVS_NEW_VERSION_FOUND 0x113  // NVS new version
 #define ESP_ERR_NVS_NOT_INITIALIZED 0x114  // NVS not initialized
+#define ESP_ERR_NVS_TYPE_MISMATCH 0x117  // NVS type mismatch
 #define ESP_ERR_INVALID_RESPONSE 0x115     // Invalid response
 #define ESP_ERR_INVALID_CRC     0x116     // CRC verification failed
 

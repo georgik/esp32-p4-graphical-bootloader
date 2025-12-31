@@ -284,9 +284,34 @@ static void fw_selector_flash_cb(lv_event_t* e)
 static void fw_selector_modal_ok_cb(lv_event_t* e)
 {
     firmware_selector_t* selector = (firmware_selector_t*)lv_event_get_user_data(e);
-    if (selector && selector->completion_modal) {
+    ESP_LOGI(TAG, "Modal OK button clicked, selector=%p", selector);
+
+    if (!selector) {
+        ESP_LOGE(TAG, "Modal OK: selector is NULL!");
+        return;
+    }
+
+    if (selector->completion_modal) {
         // Hide modal
         lv_obj_add_flag(selector->completion_modal, LV_OBJ_FLAG_HIDDEN);
+
+        // Ensure flashing state is cleared (defensive fix)
+        if (flashing_in_progress) {
+            ESP_LOGW(TAG, "Modal OK: clearing flashing_in_progress flag that was still set");
+            flashing_in_progress = false;
+        }
+
+        // ALWAYS update button state when modal is closed
+        ESP_LOGI(TAG, "Modal OK: updating button states, selected_count=%u",
+                 selector->selected_count);
+        update_buttons_state(selector);
+
+        // Log button state after update
+        if (selector->flash_btn) {
+            bool is_disabled = lv_obj_has_state(selector->flash_btn, LV_STATE_DISABLED);
+            ESP_LOGI(TAG, "Modal OK: Flash button is now %s (state check)",
+                     is_disabled ? "DISABLED" : "ENABLED");
+        }
 
         // Switch back to main screen and refresh it
         switch_screen(SCREEN_MAIN);
@@ -297,6 +322,8 @@ static void fw_selector_modal_ok_cb(lv_event_t* e)
         refresh_main_screen();
 
         ESP_LOGI(TAG, "Modal closed, main screen refreshed");
+    } else {
+        ESP_LOGE(TAG, "Modal OK: completion_modal is NULL!");
     }
 }
 
@@ -347,15 +374,28 @@ static void fw_flash_status_callback(flash_state_t state, flash_result_t result,
         }
     }
 
-    // When flashing completes (successfully or not), clear the flashing in progress state
-    if (state == FLASH_STATE_COMPLETED) {
+    // When flashing completes (successfully or with error), clear the flashing in progress state
+    // Must handle BOTH COMPLETED and ERROR states to prevent button from staying disabled
+    if (state == FLASH_STATE_COMPLETED || state == FLASH_STATE_ERROR) {
+        ESP_LOGI(TAG, "Flashing %s (state=%d, result=%d), clearing flashing_in_progress flag",
+                 (state == FLASH_STATE_COMPLETED) ? "completed" : "encountered error",
+                 state, result);
+
         flashing_in_progress = false;
-        ESP_LOGI(TAG, "Flashing completed, re-enabling UI controls");
+        ESP_LOGI(TAG, "flashing_in_progress set to false");
 
         // Re-enable flash button by updating button states
         if (g_active_firmware_selector) {
-            ESP_LOGI(TAG, "Updating button states to re-enable flash button");
+            ESP_LOGI(TAG, "Updating button states to re-enable flash button, selected_count=%u",
+                     g_active_firmware_selector->selected_count);
             update_buttons_state(g_active_firmware_selector);
+
+            // Log button state after update
+            if (g_active_firmware_selector->flash_btn) {
+                bool is_disabled = lv_obj_has_state(g_active_firmware_selector->flash_btn, LV_STATE_DISABLED);
+                ESP_LOGI(TAG, "After status callback: Flash button is now %s (state check)",
+                         is_disabled ? "DISABLED" : "ENABLED");
+            }
 
             // Hide progress bar and label when flashing is complete
             if (g_active_firmware_selector->progress_bar) {
@@ -418,7 +458,7 @@ static void fw_flash_status_callback(flash_state_t state, flash_result_t result,
         } else {
             ESP_LOGW(TAG, "Firmware flashing completed with errors: result=%d", result);
 
-            // Show error modal
+            // Show error modal (cleanup already handled above in the main if block)
             if (g_active_firmware_selector && g_active_firmware_selector->completion_modal &&
                 g_active_firmware_selector->completion_label) {
 
@@ -564,13 +604,34 @@ static void update_firmware_list_item(firmware_selector_t* selector, uint32_t in
 static void update_buttons_state(firmware_selector_t* selector)
 {
     if (!selector) {
+        ESP_LOGE(TAG, "update_buttons_state: selector is NULL!");
         return;
     }
 
     // Enable/disable flash button based on selection and flashing state
     bool has_selection = (selector->selected_count > 0);
     bool should_disable = !has_selection || flashing_in_progress;
-    lv_obj_set_state(selector->flash_btn, LV_STATE_DISABLED, should_disable);
+
+    ESP_LOGI(TAG, "update_buttons_state: selected_count=%u, has_selection=%d, flashing_in_progress=%d, should_disable=%d",
+             selector->selected_count, has_selection, flashing_in_progress, should_disable);
+
+    if (selector->flash_btn) {
+        // Use add/remove state for LVGL 9 (proper API)
+        if (should_disable) {
+            lv_obj_add_state(selector->flash_btn, LV_STATE_DISABLED);
+            ESP_LOGI(TAG, "update_buttons_state: Flash button DISABLED (state added)");
+        } else {
+            lv_obj_remove_state(selector->flash_btn, LV_STATE_DISABLED);
+            ESP_LOGI(TAG, "update_buttons_state: Flash button ENABLED (state removed)");
+        }
+
+        // Verify the change
+        bool is_disabled = lv_obj_has_state(selector->flash_btn, LV_STATE_DISABLED);
+        ESP_LOGI(TAG, "update_buttons_state: Flash button state check: %s",
+                 is_disabled ? "DISABLED" : "ENABLED");
+    } else {
+        ESP_LOGE(TAG, "update_buttons_state: flash_btn is NULL!");
+    }
 
     // Update total size label
     char size_text[128];
