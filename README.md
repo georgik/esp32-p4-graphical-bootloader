@@ -40,7 +40,7 @@ The system boots into the factory application (Stage 3) by default, which presen
 │       ├── bootloader_custom.h     # Bootloader API and data structures
 │       └── CMakeLists.txt          # Bootloader component configuration
 ├── main/
-│   ├── graphical_bootloader.c      # Factory app with Raylib GUI
+│   ├── graphical_bootloader.c      # Factory app with GUI
 │   ├── board_init.c                # Display and BSP initialization
 │   ├── board_init.h                # Display and BSP declarations
 │   ├── CMakeLists.txt              # Main application configuration
@@ -80,7 +80,7 @@ Defines the bootloader data structures:
 
 #### `main/graphical_bootloader.c`
 Primary factory application with:
-- Raylib-based touch interface for framework selection
+- touch interface for framework selection
 - **Direct RTC register access** for boot requests
 - Visual feedback during boot transitions
 - Error handling and restart functionality
@@ -132,7 +132,7 @@ REG_WRITE(BOOT_REQUEST_RTC_REG, rtc_value);
 
 ## Failed Approaches (For Reference)
 
-### NVS Storage (Multiple Attempts)
+### NVS Storage
 **Reason**: NVS APIs are **not available in bootloader context**
 - `nvs_flash_init()`, `nvs_open()`, `nvs_get_blob()` cause linker errors
 - Bootloader has limited component dependencies
@@ -144,28 +144,6 @@ REG_WRITE(BOOT_REQUEST_RTC_REG, rtc_value);
 - Bootloader cannot depend on `app_update` component
 - Would require complex bootloader rebuild configuration
 
-## 🚀 Quick Start: Web Flashing
-
-For the quickest installation, use our web-based installer (Chrome/Edge browsers recommended):
-
-[![Try it with ESP Launchpad](https://espressif.github.io/esp-launchpad/assets/try_with_launchpad.png)](https://georgik.github.io/esp32-p4-graphical-bootloader/?flashConfigURL=https://georgik.github.io/esp32-p4-graphical-bootloader/config/config.toml)
-
-1. Connect your ESP32-P4 board via USB
-2. Click the button above to open the web installer
-3. Click "Connect" and select your board's serial port
-4. Click "Download & Flash" to install the bootloader
-
-### Alternative: Manual Installation
-
-#### Automated Package (Recommended)
-```bash
-# Download latest release from GitHub
-wget https://github.com/georgik/esp32-p4-graphical-bootloader/releases/latest/download/bootloader-latest-esp32_p4_function_ev_board.tar.gz
-tar -xzf bootloader-latest-esp32_p4_function_ev_board.tar.gz
-
-# Flash using provided script
-./flash-esp32_p4_function_ev_board.sh
-```
 
 #### Manual Build
 ```bash
@@ -192,33 +170,6 @@ This project implements a **three-stage boot architecture** with **RTC-based boo
 2. **Stage 2**: Custom bootloader with dynamic partition discovery
 3. **Stage 3**: Factory application with GUI framework selector
 
-### Key Features
-
-- **Touch-enabled GUI bootloader** with Raylib graphics
-- **Factory-first boot design** (always defaults to factory partition)
-- **RTC-based partition switching** (no flash wear, survives reboots)
-- **Dynamic partition mapping** (supports up to 16 OTA partitions)
-- **JSON configuration management** with SPIFFS storage
-- **Web-based flashing** via ESP-Launchpad
-- **CI/CD pipeline** for automated releases
-
-## 📊 Optimized Partition Layout
-
-The custom partition table is optimized for 16MB flash with large OTA slots:
-
-```
-Offset      Size     Type       Purpose
-0x00000     64KB     bootloader  Custom bootloader
-0x10000     4KB      partition   Partition table
-0x20000     1MB      factory     Factory app (GUI selector) - DEFAULT
-0x120000    32KB     nvs         Non-volatile storage
-0x128000    8KB      otadata     OTA metadata
-0x130000    2MB      spiffs      JSON configs, icons, OTA staging
-0x330000    4.8MB    ota_0       OTA slot 0 (largest for main apps)
-0x800000    4MB      ota_1       OTA slot 1
-0xC00000    4MB      ota_2       OTA slot 2
-            Total OTA: 12.8MB
-```
 
 ## Build Configuration
 
@@ -252,7 +203,6 @@ idf_component_register(
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES
-        georgik__raylib
         espressif__esp_lcd_touch
         espressif__esp32_p4_function_ev_board_noglib
         esp_partition
@@ -274,9 +224,6 @@ source /path/to/esp-idf/export.sh
 
 # Build the project
 idf.py build
-
-# Create distribution package
-./package.sh v1.0.0
 
 # Or flash directly
 idf.py flash
@@ -349,27 +296,11 @@ I (xxx) bootloader_custom: RTC boot request found: magic=0x00544551, partition_t
 I (xxx) bootloader_custom: Boot request cleared - clearing RTC register
 ```
 
-### Application Logs
-Monitor for boot request creation:
-```
-I (xxx) RaylibDemo: Writing boot request to RTC register: magic=0x00544551, partition_type=1
-I (xxx) RaylibDemo: RTC register updated successfully, value: 0x01544551
-I (xxx) RaylibDemo: Restarting now for bootloader to handle the boot request...
-```
-
 ### Common Issues
 1. **No boot request detected**: Check RTC register write format
 2. **Wrong partition boots**: Verify partition type mapping
 3. **Factory doesn't load**: Check partition table integrity
 4. **Boot loop**: RTC register not being cleared properly
-
-## Technical Documentation
-
-See `boot-knowledge.txt` for detailed technical information about:
-- Available storage options in bootloader context
-- RTC register specifications for ESP32-P4
-- Bootloader flash API alternatives
-- Implementation decisions and trade-offs
 
 ## Integration Notes
 
