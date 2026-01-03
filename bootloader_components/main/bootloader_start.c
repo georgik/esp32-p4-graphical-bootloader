@@ -80,8 +80,41 @@ void __attribute__((noreturn)) call_start_cpu0(void)
 
     ESP_LOGI(TAG, "Loading boot image from bootloader index: %d", boot_index);
 
-    // Load the selected boot image
-    bootloader_utility_load_boot_image(&bs, boot_index);
+    // Get the partition to boot from
+    const esp_partition_t* boot_partition = NULL;
+    if (boot_index == FACTORY_INDEX) {
+        // Factory partition
+        boot_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
+                                                     ESP_PARTITION_SUBTYPE_APP_FACTORY,
+                                                     NULL);
+        if (boot_partition) {
+            ESP_LOGI(TAG, "Booting from factory partition: %s at 0x%x",
+                     boot_partition->label, boot_partition->address);
+        } else {
+            ESP_LOGE(TAG, "Factory partition not found!");
+            bootloader_reset();
+        }
+    } else if (boot_index >= 0) {
+        // OTA partition
+        boot_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
+                                                     ESP_PARTITION_SUBTYPE_APP_OTA_MIN + boot_index,
+                                                     NULL);
+        if (boot_partition) {
+            ESP_LOGI(TAG, "Booting from OTA partition %d: %s at 0x%x",
+                     boot_index, boot_partition->label, boot_partition->address);
+        } else {
+            ESP_LOGE(TAG, "OTA partition %d not found!", boot_index);
+            bootloader_reset();
+        }
+    }
+
+    if (boot_partition) {
+        // Load the boot image from the selected partition
+        bootloader_utility_load_boot_image(&bs, boot_index);
+    }
+
+    // Should never reach here
+    bootloader_reset();
 }
 
 // Required for newlib support

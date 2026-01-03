@@ -1,17 +1,33 @@
 # Main graphical bootloader application
 idf_component_register(
     SRCS
-        "graphical_bootloader.c"
+        "main.c"
+        "lvgl_bootloader.c"
         "board_init.c"
+        "sd_ota.c"
+        "firmware_selector.c"
+        "firmware_validator.c"
+        "partition_manager.c"
+        "firmware_flasher.c"
+        "partition_visualizer.c"
+        "firmware_metadata.c"
+        "firmware_storage.c"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES
-        georgik__raylib
+        #georgik__raylib
         espressif__esp_lcd_touch
-        espressif__esp32_p4_function_ev_board_noglib
+        espressif__esp32_p4_function_ev_board
         esp_partition
         esp_timer
         esp_system
         spiffs                 # For configuration storage
+        app_update             # For OTA operations
+        esp_app_format         # For OTA operations
+        fatfs                  # For SD card filesystem
+        sdmmc                  # For SD card access
+        spi_flash              # For direct flash access
+        nvs_flash              # For firmware configuration storage
+        mbedtls                # For MD5 checksum calculation
         # esp_raylib_port is pulled in via georgik__raylib dependency
 )
