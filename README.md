@@ -2,7 +2,7 @@
 
 A 2nd + 3rd stage bootloader with touch-enabled GUI framework selection for ESP32-P4 Function EV Board.
 The bootloader allows graphical selection of partition to boot using RTC mechanism.
-After the next HW reboot it returns to orifinal state.
+After the next HW reboot it returns to original state.
 This approach does not require modification of flashed applications.
 
 If you're lookign for simpler bootloader which utilizes OTA partition switching, check out article:
