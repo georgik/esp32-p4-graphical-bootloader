@@ -74,7 +74,12 @@ esp_err_t flash_emulator_init(const char* flash_path) {
 
 void flash_emulator_deinit(void) {
     if (flash_mapped_base != NULL) {
-        munmap(flash_mapped_base, flash_mapped_size);
+        // Check if it's mmap'd or malloc'd
+        if (flash_fd >= 0) {
+            munmap(flash_mapped_base, flash_mapped_size);
+        } else {
+            free(flash_mapped_base);
+        }
         flash_mapped_base = NULL;
         flash_mapped_size = 0;
     }
@@ -89,6 +94,36 @@ void flash_emulator_deinit(void) {
 
 bool flash_emulator_is_initialized(void) {
     return flash_mapped_base != NULL;
+}
+
+esp_err_t flash_emulator_load_image(const uint8_t* buffer, size_t size) {
+    if (!buffer || size == 0) {
+        ESP_LOGE(TAG, "Invalid buffer or size");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (flash_mapped_base != NULL) {
+        ESP_LOGE(TAG, "Flash emulator already initialized, must deinit first");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // For loading images, we'll create a temporary in-memory buffer
+    // This allows inspection without a file
+    flash_mapped_size = size;
+
+    // Allocate memory for flash image
+    flash_mapped_base = (uint8_t*)malloc(size);
+    if (!flash_mapped_base) {
+        ESP_LOGE(TAG, "Failed to allocate memory for flash image");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Copy image data
+    memcpy(flash_mapped_base, buffer, size);
+
+    ESP_LOGI(TAG, "Flash image loaded into memory (%zu bytes @ %p)", size, flash_mapped_base);
+
+    return ESP_OK;
 }
 
 esp_err_t flash_emulator_read(uint32_t offset, void* buffer, size_t size) {

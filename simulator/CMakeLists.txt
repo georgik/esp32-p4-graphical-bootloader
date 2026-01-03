@@ -37,6 +37,7 @@ include_directories(
     ${SDL2_INCLUDE_DIRS}
     ${JSONC_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/lvgl  # LVGL root
+    ${CMAKE_SOURCE_DIR}       # Simulator root (for firmware_storage_config.h)
     ${CMAKE_SOURCE_DIR}/..     # For lv_conf.h in parent
     ${CMAKE_SOURCE_DIR}/../main
     ${CMAKE_SOURCE_DIR}/mocks
@@ -49,9 +50,12 @@ add_definitions(-D__SIMULATOR_BUILD__=1)
 # Source files
 set(SIMULATOR_SOURCES
     main.c
+    cli_parser.c
+    cli_inspector.c
     platform/lvgl_sdl_init.c
     platform/flash_emulator.c
     platform/flash_builder.c
+    platform/crc32.c
 )
 
 # Mock sources
@@ -66,6 +70,7 @@ set(MOCK_SOURCES
     mocks/mbedtls_md5_mock.c
     mocks/sdmmc_mock.c
     mocks/esp_flash_mock.c
+    mocks/firmware_storage_mock.c  # Mock for firmware_storage (uses flash emulator)
     # Removed: mocks/firmware_flasher_mock.c - using real firmware_flasher.c instead
     mocks/vfs_mock.c
 )

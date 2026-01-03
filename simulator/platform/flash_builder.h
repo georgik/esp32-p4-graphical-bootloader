@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include <sys/types.h>  // For ssize_t
 
 #ifdef __cplusplus
@@ -90,6 +91,62 @@ long flash_builder_get_file_size(const char* filepath);
  * @return Number of bytes read, or -1 on error
  */
 ssize_t flash_builder_read_file(const char* filepath, void* buffer, size_t max_size);
+
+/**
+ * @brief Firmware storage entry structure (96 bytes)
+ */
+typedef struct __attribute__((packed)) {
+    uint32_t offset;        // Offset from firmware data start (4 bytes)
+    uint32_t size;          // Firmware size in bytes (4 bytes)
+    uint32_t crc32;         // CRC32 checksum (4 bytes)
+    uint32_t flags;         // Flags (4 bytes)
+    char name[64];          // Firmware filename (64 bytes)
+    uint8_t reserved[12];   // Reserved for future (12 bytes)
+    uint32_t next_offset;   // Offset to next entry (4 bytes)
+} firmware_entry_t;
+
+/**
+ * @brief Firmware storage header structure (32 bytes)
+ */
+typedef struct __attribute__((packed)) {
+    char magic[4];          // 'FWST' (Firmware Storage) (4 bytes)
+    uint32_t version;       // Version 1 (4 bytes)
+    uint32_t count;         // Number of firmwares (4 bytes)
+    uint32_t header_size;   // Header size in bytes (4 bytes)
+    uint8_t reserved[16];   // Reserved for future (16 bytes)
+} firmware_storage_header_t;
+
+/**
+ * @brief Create flash image with multiple firmwares
+ *
+ * Creates a flash image containing:
+ * - Bootloader at 0x2000
+ * - Partition table at 0x10000
+ * - Factory app at 0x20000
+ * - Firmware storage area at 0xB0000 with multiple firmwares
+ *
+ * @param output_path Output filename
+ * @param bootloader_path Bootloader binary path (or NULL for default)
+ * @param partition_table_path Partition table path (or NULL for default)
+ * @param factory_app_path Factory app path (or NULL for default)
+ * @param firmware_paths Array of firmware file paths
+ * @param firmware_names Array of firmware display names
+ * @param firmware_count Number of firmwares
+ * @param trim_zeros Trim trailing zeros from output
+ * @param flash_size_mb Flash size in MB
+ * @return FLASH_BUILDER_OK on success, error code otherwise
+ */
+flash_builder_err_t flash_builder_create_with_firmwares(
+    const char* output_path,
+    const char* bootloader_path,
+    const char* partition_table_path,
+    const char* factory_app_path,
+    char** firmware_paths,
+    char** firmware_names,
+    int firmware_count,
+    bool trim_zeros,
+    int flash_size_mb
+);
 
 #endif // __SIMULATOR_BUILD__
 

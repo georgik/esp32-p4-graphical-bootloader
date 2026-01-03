@@ -90,6 +90,17 @@ esp_err_t firmware_selector_init(firmware_selector_t* selector);
 esp_err_t firmware_selector_scan_directory(firmware_selector_t* selector);
 
 /**
+ * @brief Scan firmware storage area and populate firmware list
+ *
+ * Scans the firmware storage area at 0x13C000 for pre-loaded firmwares.
+ * This is useful when no SD card is available.
+ *
+ * @param selector Initialized firmware selector
+ * @return esp_err_t ESP_OK on success, ESP_ERR_NOT_FOUND if no firmware storage, error code otherwise
+ */
+esp_err_t firmware_selector_scan_storage(firmware_selector_t* selector);
+
+/**
  * @brief Create LVGL UI for firmware selection
  *
  * @param selector Initialized and scanned firmware selector

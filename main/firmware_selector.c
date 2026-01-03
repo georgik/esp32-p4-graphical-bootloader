@@ -4,6 +4,7 @@
  */
 
 #include "firmware_selector.h"
+#include "firmware_storage.h"
 #include "firmware_validator.h"
 #include "partition_manager.h"
 #include "firmware_flasher.h"
@@ -1099,7 +1100,6 @@ esp_err_t firmware_selector_store_firmware_config(firmware_selector_t* selector)
 
     // Store each selected firmware
     char key[32];
-    char value[256];
     for (uint32_t i = 0; i < selected_count; i++) {
         firmware_info_t* firmware = selected_firmware[i];
 
@@ -1170,4 +1170,75 @@ esp_err_t firmware_selector_store_firmware_config(firmware_selector_t* selector)
 
     nvs_close(nvs_handle);
     return err;
+}
+
+esp_err_t firmware_selector_scan_storage(firmware_selector_t* selector)
+{
+    if (!selector || !selector->is_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Scanning firmware storage area...");
+
+    // Check if firmware storage exists
+    bool storage_valid = false;
+    esp_err_t ret = firmware_storage_check_valid(&storage_valid);
+    if (ret != ESP_OK || !storage_valid) {
+        ESP_LOGI(TAG, "No valid firmware storage found");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    // Get firmware count
+    uint32_t firmware_count = 0;
+    ret = firmware_storage_get_count(&firmware_count);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get firmware count from storage");
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Found %u firmwares in storage", firmware_count);
+
+    // Add each firmware to the list
+    for (uint32_t i = 0; i < firmware_count && selector->firmware_count < MAX_FIRMWARE_COUNT; i++) {
+        firmware_storage_entry_t entry;
+        ret = firmware_storage_get_entry(i, &entry);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to get firmware entry %u", i);
+            continue;
+        }
+
+        // Create firmware info entry
+        firmware_info_t* firmware = &selector->firmware_list[selector->firmware_count];
+        memset(firmware, 0, sizeof(firmware_info_t));
+
+        // Copy display name
+        strncpy(firmware->display_name, entry.name, sizeof(firmware->display_name) - 1);
+        firmware->display_name[sizeof(firmware->display_name) - 1] = '\0';
+
+        // Set filename (use display name as filename)
+        strncpy(firmware->filename, entry.name, sizeof(firmware->filename) - 1);
+        firmware->filename[sizeof(firmware->filename) - 1] = '\0';
+
+        // Set file path to indicate firmware storage
+        snprintf(firmware->file_path, sizeof(firmware->file_path),
+                 "flash://0x%08X", FIRMWARE_STORAGE_OFFSET);
+
+        // Copy metadata
+        firmware->size = entry.size;
+        firmware->crc32 = entry.crc32;
+        firmware->is_valid = true;
+        firmware->is_selected = false;
+        firmware->assigned_partition = NULL;
+
+        ESP_LOGI(TAG, "  [%u] %s (%u bytes, CRC32: 0x%08X)",
+                 selector->firmware_count, firmware->display_name,
+                 firmware->size, firmware->crc32);
+
+        selector->firmware_count++;
+    }
+
+    ESP_LOGI(TAG, "Firmware storage scan complete: %u firmwares added",
+             selector->firmware_count);
+
+    return ESP_OK;
 }

@@ -11,6 +11,7 @@ idf_component_register(
         "firmware_flasher.c"
         "partition_visualizer.c"
         "firmware_metadata.c"
+        "firmware_storage.c"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES

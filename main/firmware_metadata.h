@@ -105,6 +105,16 @@ esp_err_t firmware_metadata_find_by_partition(const char* partition, uint32_t* i
  */
 void firmware_metadata_print_all(void);
 
+/**
+ * @brief Scan firmware storage and populate NVS with firmware metadata
+ *
+ * This function scans the firmware storage area, reads all firmware entries,
+ * and stores their metadata in NVS for later retrieval by the bootloader UI.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t firmware_metadata_scan_and_store(void);
+
 #ifdef __cplusplus
 }
 #endif

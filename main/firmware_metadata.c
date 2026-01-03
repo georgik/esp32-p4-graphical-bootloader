@@ -4,6 +4,7 @@
  */
 
 #include "firmware_metadata.h"
+#include "firmware_storage.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include <string.h>
@@ -461,4 +462,81 @@ void firmware_metadata_print_all(void) {
     }
 
     ESP_LOGI(TAG, "======================================");
+}
+
+esp_err_t firmware_metadata_scan_and_store(void) {
+    ESP_LOGI(TAG, "Scanning firmware storage to populate NVS...");
+
+    // Check if firmware storage exists
+    bool storage_valid = false;
+    esp_err_t ret = firmware_storage_check_valid(&storage_valid);
+    if (ret != ESP_OK || !storage_valid) {
+        ESP_LOGW(TAG, "No valid firmware storage found");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    // Get firmware count
+    uint32_t firmware_count = 0;
+    ret = firmware_storage_get_count(&firmware_count);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get firmware count from storage");
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Found %u firmwares in storage, populating NVS...", firmware_count);
+
+    // Clear any existing firmware metadata
+    firmware_metadata_clear_all();
+
+    // Read each firmware entry and store in NVS
+    for (uint32_t i = 0; i < firmware_count && i < MAX_FIRMWARE_ENTRIES; i++) {
+        firmware_storage_entry_t entry;
+        ret = firmware_storage_get_entry(i, &entry);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to get firmware entry %u", i);
+            continue;
+        }
+
+        // Create metadata entry
+        firmware_metadata_t metadata;
+        memset(&metadata, 0, sizeof(metadata));
+
+        // Copy filename from name field
+        strncpy(metadata.filename, entry.name, sizeof(metadata.filename) - 1);
+        metadata.filename[sizeof(metadata.filename) - 1] = '\0';
+
+        // Assign to OTA partitions (ota_0, ota_1, ota_2, etc.)
+        snprintf(metadata.partition, sizeof(metadata.partition), "ota_%" PRIu32, i);
+
+        // Copy other fields
+        metadata.offset = entry.offset;
+        metadata.size = entry.size;
+        metadata.crc32 = entry.crc32;
+        metadata.is_valid = true;
+        metadata.timestamp = (uint32_t)time(NULL);
+
+        // Store in NVS
+        ret = firmware_metadata_set(i, &metadata);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to store firmware metadata %" PRIu32 ": %s", i, esp_err_to_name(ret));
+            continue;
+        }
+
+        ESP_LOGI(TAG, "  [%" PRIu32 "] %s -> %s (%" PRIu32 " bytes, CRC32: 0x%08X)",
+                 i, metadata.filename, metadata.partition, metadata.size, metadata.crc32);
+    }
+
+    // Set the total count
+    ret = firmware_metadata_set_count(firmware_count);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set firmware count: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "✓ Firmware storage scan complete: %u firmwares stored in NVS", firmware_count);
+
+    // Print what we stored for debugging
+    firmware_metadata_print_all();
+
+    return ESP_OK;
 }

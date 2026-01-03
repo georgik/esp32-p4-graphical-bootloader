@@ -26,6 +26,10 @@
 
 static const char *TAG = "lvgl_bootloader";
 
+// RTC register constants for bootloader communication
+#define BOOT_REQUEST_RTC_REG     LP_SYSTEM_REG_LP_STORE0_REG
+#define BOOT_REQUEST_MAGIC_RTC   0x00544551  // 'BOOT' magic in ASCII
+
 // Display mutex for thread safety (fallback if BSP doesn't provide lock)
 static SemaphoreHandle_t lvgl_mutex = NULL;
 
@@ -38,9 +42,12 @@ static lv_obj_t *progress_bar = NULL;
 static lv_obj_t *progress_label = NULL;
 static lv_obj_t *app_cont = NULL;
 
-// Firmware selector
-static firmware_selector_t firmware_selector;
+// Firmware selectors
+static firmware_selector_t firmware_selector;  // For SD card (firmwares to flash)
 static bool firmware_selector_initialized = false;
+
+static firmware_selector_t boot_menu_selector;  // For firmware storage (installed firmwares)
+static bool boot_menu_selector_initialized = false;
 
 // Screen IDs
 static int current_screen = SCREEN_MAIN;
@@ -145,96 +152,62 @@ static void create_main_screen(void)
     lv_obj_set_flex_flow(app_cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(app_cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    // Small delay to ensure NVS is ready (especially after recent writes)
-    vTaskDelay(pdMS_TO_TICKS(50));
+    // Use boot_menu_selector to get firmware list from firmware storage (installed firmwares)
+    ESP_LOGI(TAG, "Creating firmware list from boot_menu_selector (firmware storage)...");
 
-    // Read firmware configuration from NVS and create boot buttons
-    nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open("firmware_config", NVS_READONLY, &nvs_handle);
-    ESP_LOGI(TAG, "create_main_screen: NVS open result: %s", esp_err_to_name(err));
+    if (!boot_menu_selector_initialized) {
+        ESP_LOGW(TAG, "Boot menu selector not initialized, no firmwares to display");
+        lv_obj_t *label = lv_label_create(app_cont);
+        lv_label_set_text(label, "No firmwares available.\nPlease scan firmware storage first.");
+        return;
+    }
 
-    if (err == ESP_OK) {
-        uint32_t firmware_count = 0;
-        err = nvs_get_u32(nvs_handle, "firmware_count", &firmware_count);
-        ESP_LOGI(TAG, "create_main_screen: NVS firmware_count read result: %s, count: %lu", esp_err_to_name(err), (unsigned long)firmware_count);
+    uint32_t firmware_count = boot_menu_selector.firmware_count;
+    ESP_LOGI(TAG, "Found %u firmware(s) in boot_menu_selector", firmware_count);
 
-        if (err == ESP_OK && firmware_count > 0) {
-            ESP_LOGI(TAG, "Found %lu firmware(s) in NVS", (unsigned long)firmware_count);
+    if (firmware_count == 0) {
+        ESP_LOGW(TAG, "No firmwares in boot_menu_selector");
+        lv_obj_t *label = lv_label_create(app_cont);
+        lv_label_set_text(label, "No firmwares available.\nPlease add firmwares to firmware storage.");
+        return;
+    }
 
-            for (uint32_t i = 0; i < firmware_count; i++) {
-                char key[32];
-                char filename[128];
-                char partition_name[32];
-                uint32_t offset, size, crc32;
-
-                // Read firmware data from NVS
-                snprintf(key, sizeof(key), "fw_%lu_filename", (unsigned long)i);
-                size_t filename_len = sizeof(filename);
-                if (nvs_get_str(nvs_handle, key, filename, &filename_len) != ESP_OK) {
-                    continue;
-                }
-
-                snprintf(key, sizeof(key), "fw_%lu_partition", (unsigned long)i);
-                size_t partition_len = sizeof(partition_name);
-                if (nvs_get_str(nvs_handle, key, partition_name, &partition_len) != ESP_OK) {
-                    continue;
-                }
-
-                snprintf(key, sizeof(key), "fw_%lu_offset", (unsigned long)i);
-                if (nvs_get_u32(nvs_handle, key, &offset) != ESP_OK) {
-                    continue;
-                }
-
-                snprintf(key, sizeof(key), "fw_%lu_size", (unsigned long)i);
-                if (nvs_get_u32(nvs_handle, key, &size) != ESP_OK) {
-                    continue;
-                }
-
-                snprintf(key, sizeof(key), "fw_%lu_crc32", (unsigned long)i);
-                if (nvs_get_u32(nvs_handle, key, &crc32) != ESP_OK) {
-                    continue;
-                }
-
-                // Create boot button for this firmware
-                lv_obj_t *btn = lv_btn_create(app_cont);
-                lv_obj_add_style(btn, &style_btn, 0);
-                lv_obj_add_style(btn, &style_btn_pressed, LV_STATE_PRESSED);
-                lv_obj_set_size(btn, 800, 80);
-
-                // Store partition name for boot callback
-                char *stored_partition = malloc(strlen(partition_name) + 1);
-                strcpy(stored_partition, partition_name);
-                lv_obj_set_user_data(btn, stored_partition);
-
-                // Create button label with firmware info
-                char btn_text[256];
-                char size_str[32];
-                firmware_format_size(size, size_str, sizeof(size_str));
-                snprintf(btn_text, sizeof(btn_text), "%s\n%s (%s, CRC: 0x%08lX)",
-                         filename, partition_name, size_str, (unsigned long)crc32);
-
-                lv_obj_t *label = lv_label_create(btn);
-                lv_label_set_text(label, btn_text);
-                lv_obj_center(label);
-                lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
-
-                lv_obj_add_event_cb(btn, boot_firmware_cb, LV_EVENT_CLICKED, NULL);
-
-                ESP_LOGI(TAG, "Created boot button for %s -> %s", filename, partition_name);
-            }
-        } else {
-            ESP_LOGI(TAG, "No firmware found in NVS");
-            lv_obj_t *no_fw_label = lv_label_create(app_cont);
-            lv_label_set_text(no_fw_label, "No applications found.\nLoad firmware from SD card first.");
-            lv_obj_set_style_text_align(no_fw_label, LV_TEXT_ALIGN_CENTER, 0);
+    // Create boot buttons for each firmware from boot_menu_selector
+    for (uint32_t i = 0; i < firmware_count; i++) {
+        const firmware_info_t* firmware = &boot_menu_selector.firmware_list[i];
+        if (!firmware) {
+            ESP_LOGW(TAG, "Failed to get firmware %u", i);
+            continue;
         }
 
-        nvs_close(nvs_handle);
-    } else {
-        ESP_LOGE(TAG, "create_main_screen: Failed to open NVS: %s", esp_err_to_name(err));
-        lv_obj_t *error_label = lv_label_create(app_cont);
-        lv_label_set_text(error_label, "No application on flash,\nclick Load from SD Card.");
-        lv_obj_set_style_text_align(error_label, LV_TEXT_ALIGN_CENTER, 0);
+        // Create boot button for this firmware
+        lv_obj_t *btn = lv_btn_create(app_cont);
+        lv_obj_add_style(btn, &style_btn, 0);
+        lv_obj_add_style(btn, &style_btn_pressed, LV_STATE_PRESSED);
+        lv_obj_set_size(btn, 800, 80);
+
+        // Store firmware index for boot callback
+        uint32_t *stored_index = malloc(sizeof(uint32_t));
+        *stored_index = i;
+        lv_obj_set_user_data(btn, stored_index);
+
+        // Create button label with firmware info
+        char btn_text[256];
+        char size_str[32];
+        firmware_format_size(firmware->size, size_str, sizeof(size_str));
+
+        // Use display name from firmware_selector
+        snprintf(btn_text, sizeof(btn_text), "%s\nSize: %s, CRC32: 0x%08" PRIX32,
+                 firmware->display_name, size_str, firmware->crc32);
+
+        lv_obj_t *label = lv_label_create(btn);
+        lv_label_set_text(label, btn_text);
+        lv_obj_center(label);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
+
+        lv_obj_add_event_cb(btn, boot_firmware_cb, LV_EVENT_CLICKED, NULL);
+
+        ESP_LOGI(TAG, "Created boot button for firmware %u: %s", i, firmware->display_name);
     }
 
     // Create "Load from SD Card" button in lower right corner (smaller)
@@ -326,17 +299,38 @@ static void create_settings_screen(void)
 static void boot_firmware_cb(lv_event_t *e)
 {
     lv_obj_t *btn = lv_event_get_target(e);
-    const char* partition_name = (const char*)lv_obj_get_user_data(btn);
+    uint32_t* firmware_index = (uint32_t*)lv_obj_get_user_data(btn);
 
-    if (partition_name) {
-        ESP_LOGI(TAG, "Booting firmware from partition: %s", partition_name);
-        esp_err_t ret = boot_firmware_from_partition(partition_name);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to boot firmware from %s: %s", partition_name, esp_err_to_name(ret));
-            // Show error message or return to main screen
-            switch_screen(SCREEN_MAIN);
+    if (firmware_index && boot_menu_selector_initialized) {
+        const firmware_info_t* firmware = &boot_menu_selector.firmware_list[*firmware_index];
+        if (firmware) {
+            ESP_LOGI(TAG, "Booting firmware %u: %s (%u bytes)",
+                     *firmware_index, firmware->display_name, firmware->size);
+
+            // Map firmware index to partition index for bootloader
+            // Bootloader expects: 0=factory, 1=ota_0, 2=ota_1, etc.
+            // Our firmware list: 0=ota_0, 1=ota_1 (no factory in list)
+            int partition_index = (int)(*firmware_index) + 1;
+
+            ESP_LOGI(TAG, "Writing boot request to RTC register: magic=0x%08x, partition_index=%d",
+                     BOOT_REQUEST_MAGIC_RTC, partition_index);
+
+            // Write boot request to RTC register for bootloader to read
+            // Combine magic and partition index: lower 24 bits = magic, upper 8 bits = partition index
+            uint32_t rtc_value = BOOT_REQUEST_MAGIC_RTC | (partition_index << 24);
+            REG_WRITE(BOOT_REQUEST_RTC_REG, rtc_value);
+
+            ESP_LOGI(TAG, "RTC register updated successfully, value: 0x%08x", rtc_value);
+
+            // Add delay to show booting animation
+            vTaskDelay(pdMS_TO_TICKS(2000));
+
+            ESP_LOGI(TAG, "Restarting now for bootloader to handle the boot request...");
+            esp_restart();
+        } else {
+            ESP_LOGE(TAG, "Firmware %u not found", *firmware_index);
         }
-        // If successful, the device should restart and boot the new firmware
+        free(firmware_index);  // Free the allocated index
     }
 }
 
@@ -688,6 +682,22 @@ esp_err_t lvgl_bootloader_init(void)
     // Initialize styles
     init_styles();
 
+    // Initialize boot menu selector (scans firmware storage for installed firmwares)
+    ESP_LOGI(TAG, "Initializing boot menu selector (firmware storage)...");
+    esp_err_t ret = firmware_selector_init(&boot_menu_selector);
+    if (ret == ESP_OK) {
+        ret = firmware_selector_scan_storage(&boot_menu_selector);
+        if (ret == ESP_OK && boot_menu_selector.firmware_count > 0) {
+            boot_menu_selector_initialized = true;
+            ESP_LOGI(TAG, "Boot menu selector initialized: %u installed firmwares found",
+                     boot_menu_selector.firmware_count);
+        } else {
+            ESP_LOGW(TAG, "No installed firmwares found in firmware storage");
+        }
+    } else {
+        ESP_LOGW(TAG, "Failed to initialize boot menu selector: %s", esp_err_to_name(ret));
+    }
+
     // Create screens
     create_main_screen();
     create_demo_screen();
@@ -715,10 +725,19 @@ esp_err_t init_firmware_selector_screen(void)
             return ret;
         }
 
+        // Try SD card scan first
         ret = firmware_selector_scan_directory(&firmware_selector);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to scan firmware directory: %s", esp_err_to_name(ret));
-            return ret;
+
+        // If SD card scan fails or finds no firmwares, try firmware storage
+        if (ret != ESP_OK || firmware_selector.firmware_count == 0) {
+            ESP_LOGI(TAG, "No firmwares on SD card, scanning firmware storage...");
+            ret = firmware_selector_scan_storage(&firmware_selector);
+
+            // If firmware storage scan also fails, return error
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "No firmwares found on SD card or in firmware storage");
+                return ret;
+            }
         }
 
         ret = firmware_selector_create_ui(&firmware_selector);

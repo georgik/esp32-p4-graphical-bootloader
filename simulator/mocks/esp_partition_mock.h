@@ -27,6 +27,7 @@ typedef enum {
 // Partition subtypes
 typedef enum {
     ESP_PARTITION_SUBTYPE_APP_FACTORY = 0x00,
+    ESP_PARTITION_SUBTYPE_APP_OTA_MIN = 0x10,  // Minimum OTA subtype
     ESP_PARTITION_SUBTYPE_APP_OTA_0 = 0x10,
     ESP_PARTITION_SUBTYPE_APP_OTA_1 = 0x11,
     ESP_PARTITION_SUBTYPE_APP_OTA_2 = 0x12,

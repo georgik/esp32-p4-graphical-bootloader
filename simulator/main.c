@@ -17,6 +17,8 @@
 #include "platform/lvgl_sdl_init.h"
 #include "platform/flash_builder.h"
 #include "platform/flash_emulator.h"
+#include "cli_parser.h"
+#include "cli_inspector.h"
 
 // Bootloader headers
 #include "../main/lvgl_bootloader.h"
@@ -252,25 +254,91 @@ void cleanup(void) {
 
 // Main entry point
 int main(int argc, char** argv) {
+    // Create CLI configuration
+    cli_config_t* config = cli_config_create();
+    if (!config) {
+        ESP_LOGE(TAG, "Failed to create CLI config");
+        return 1;
+    }
+
     // Parse command line arguments
-    bool verbose = false;
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
-            verbose = true;
-        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf("Usage: %s [options]\n", argv[0]);
-            printf("Options:\n");
-            printf("  -v, --verbose    Enable verbose logging\n");
-            printf("  -h, --help       Show this help message\n");
-            return 0;
-        }
+    int mode = cli_parse_args(argc, argv, config);
+    if (mode < 0) {
+        // Error or --help shown
+        cli_config_free(config);
+        return (mode == -1) ? 0 : 1;
     }
 
     // Set log level if verbose
-    if (verbose) {
+    if (config->verbose) {
         esp_log_level_set("*", ESP_LOG_VERBOSE);
     }
 
+    // Handle CLI modes
+    if (mode == MODE_LIST_FIRMWARES) {
+        int ret = cli_list_firmwares();
+        cli_config_free(config);
+        return (ret == 0) ? 0 : 1;
+    }
+
+    if (mode == MODE_INSPECT_IMAGE) {
+        int ret = cli_inspect_image(config->inspect_image_path);
+        cli_config_free(config);
+        return (ret == 0) ? 0 : 1;
+    }
+
+    if (mode == MODE_CREATE_IMAGE) {
+        // Validate configuration
+        int ret = cli_validate_config(config);
+        if (ret != 0) {
+            ESP_LOGE(TAG, "Configuration validation failed");
+            cli_config_free(config);
+            return 1;
+        }
+
+        // Print configuration
+        cli_print_config(config);
+
+        // Create flash image with firmwares
+        flash_builder_err_t fb_ret = flash_builder_create_with_firmwares(
+            config->output_path ? config->output_path : "simulated-flash.bin",
+            config->bootloader_path,
+            config->partition_table_path,
+            config->factory_app_path,
+            config->firmware_paths,
+            config->firmware_names,
+            config->firmware_count,
+            config->trim_zeros,
+            config->flash_size_mb
+        );
+
+        cli_config_free(config);
+
+        if (fb_ret == FLASH_BUILDER_OK) {
+            ESP_LOGI(TAG, "\n✓ Done!");
+            return 0;
+        } else {
+            ESP_LOGE(TAG, "Failed to create flash image: %d", fb_ret);
+            return 1;
+        }
+    }
+
+    // MODE_LOAD_AND_SIMULATE: Load image then run simulator
+    if (mode == MODE_LOAD_AND_SIMULATE) {
+        ESP_LOGI(TAG, "Loading flash image from file: %s", config->load_image_path);
+
+        int ret = cli_load_image(config->load_image_path);
+        if (ret != 0) {
+            ESP_LOGE(TAG, "Failed to load flash image");
+            cli_config_free(config);
+            return 1;
+        }
+
+        // Image loaded, continue to simulator GUI
+        ESP_LOGI(TAG, "Image loaded, starting simulator GUI...\n");
+    }
+
+    // Default: MODE_SIMULATE or MODE_LOAD_AND_SIMULATE
     // Print banner
     print_banner();
 
@@ -287,17 +355,22 @@ int main(int argc, char** argv) {
     signal(SIGFPE, crash_handler);
     signal(SIGABRT, crash_handler);
 
-    // Initialize flash image
-    esp_err_t ret = initialize_flash_image();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Flash image initialization failed: %s", esp_err_to_name(ret));
-        return 1;
+    // Initialize flash image (only if not loading from file)
+    esp_err_t ret;
+    if (mode != MODE_LOAD_AND_SIMULATE) {
+        ret = initialize_flash_image();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Flash image initialization failed: %s", esp_err_to_name(ret));
+            cli_config_free(config);
+            return 1;
+        }
     }
 
     // Initialize simulator
     ret = initialize_simulator();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Simulator initialization failed: %s", esp_err_to_name(ret));
+        cli_config_free(config);
         return 1;
     }
 
@@ -306,6 +379,8 @@ int main(int argc, char** argv) {
 
     // Cleanup
     cleanup();
+
+    cli_config_free(config);
 
     printf("\n");
     printf("Simulator exited cleanly.\n");

@@ -65,6 +65,18 @@ esp_err_t flash_emulator_init(const char* flash_path);
 void flash_emulator_deinit(void);
 
 /**
+ * @brief Load flash image from buffer into emulator
+ *
+ * Loads a complete flash image into memory, replacing the current flash contents.
+ * The flash emulator must NOT be initialized when calling this function.
+ *
+ * @param buffer Flash image data
+ * @param size Size of flash image data
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t flash_emulator_load_image(const uint8_t* buffer, size_t size);
+
+/**
  * @brief Check if flash emulator is initialized
  *
  * @return true if initialized, false otherwise
