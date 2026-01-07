@@ -67,19 +67,14 @@ esp_err_t firmware_storage_get_count(uint32_t* count)
         return ret;
     }
 
-    // Debug: Log what we read
-    ESP_LOGI(TAG, "Read header from 0x%X: magic='%.4s' version=%u count=%u header_size=%u",
-             FIRMWARE_STORAGE_OFFSET, header.magic, header.version, header.count, header.header_size);
-
     // Validate magic
     if (memcmp(header.magic, "FWST", 4) != 0) {
-        ESP_LOGE(TAG, "Firmware storage not found (magic mismatch: '%.4s' != 'FWST')", header.magic);
+        ESP_LOGD(TAG, "Firmware storage not found (magic mismatch)");
         *count = 0;
         return ESP_ERR_NOT_FOUND;
     }
 
     *count = header.count;
-    ESP_LOGI(TAG, "Firmware storage contains %u entries", *count);
     return ESP_OK;
 }
 
@@ -257,7 +252,6 @@ esp_err_t firmware_storage_add_entry(const char* name,
     sector_header->count = header.count;
 
     // Erase and rewrite entire sector
-    ESP_LOGI(TAG, "Erasing sector to update header count to %u", header.count);
     ret = esp_flash_erase_region(NULL, FIRMWARE_STORAGE_OFFSET, 4096);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to erase sector: %s", esp_err_to_name(ret));
@@ -268,21 +262,10 @@ esp_err_t firmware_storage_add_entry(const char* name,
     vTaskDelay(pdMS_TO_TICKS(50));
 
     // Write entire sector back
-    ESP_LOGI(TAG, "Writing updated sector to flash");
     ret = esp_flash_write(NULL, sector_buffer, FIRMWARE_STORAGE_OFFSET, 4096);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to write sector: %s", esp_err_to_name(ret));
         return ret;
-    }
-
-    // Verify write by reading back
-    firmware_storage_header_t verify_header;
-    ret = esp_flash_read(NULL, &verify_header, FIRMWARE_STORAGE_OFFSET, sizeof(verify_header));
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Verified header after write: magic='%.4s' version=%u count=%u",
-                 verify_header.magic, verify_header.version, verify_header.count);
-    } else {
-        ESP_LOGW(TAG, "Could not verify header write: %s", esp_err_to_name(ret));
     }
 
     ESP_LOGI(TAG, "✓ Firmware entry added: %s (total: %u entries)", entry.name, header.count);
