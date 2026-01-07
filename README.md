@@ -1,319 +1,314 @@
-# ESP32-P4 Graphical Bootloader with RTC Boot
+# ESP32-P4 Graphical Bootloader with Multi-Firmware Support
 
-A 2nd + 3rd stage bootloader with touch-enabled GUI framework selection for ESP32-P4 Function EV Board.
-The bootloader allows graphical selection of partition to boot using RTC mechanism.
-After the next HW reboot it returns to original state.
-This approach does not require modification of flashed applications.
+A comprehensive 3-stage bootloader with LVGL-based GUI for ESP32-P4 Function EV Board. Features firmware flashing from SD card, RTC-based one-time boot, and multi-framework selection without modifying original applications.
 
-If you're lookign for simpler bootloader which utilizes OTA partition switching, check out article:
-[How to switch between multiple ESP32 firmware binaries stored in the flash memory
-](https://developer.espressif.com/blog/switch-between-firmware-binaries/), that approach requires modification
-of each of flashed applications.
+Note: Configured for ESP32-P4 1.5 (ECO5). For the older revisions please use tag: v0.2.0
 
+## Key Features
 
-## Architecture Overview
+- **LVGL-based Touch GUI**: Modern touch-enabled interface for firmware selection
+- **SD Card Firmware Flashing**: Load and flash `.bin` files directly from SD card
+- **Firmware Storage Partition**: Custom partition (FWST magic) stores firmware metadata
+- **RTC Boot Mechanism**: One-time boot via `LP_SYSTEM_REG_LP_STORE0_REG` (doesn't modify factory app)
+- **Factory-First Behavior**: Always returns to GUI after reboot (no persistent OTA switching)
+- **Multiple OTA Support**: Support for OTA_0, OTA_1, OTA_2, OTA_3 partitions
+- **Simulator Support**: Full macOS/Linux simulator for testing without hardware
 
-This project implements a three-stage boot architecture with **RTC-based boot requests**:
+## Architecture
 
-1. **Stage 1**: ESP-IDF bootloader (embedded in ROM)
-2. **Stage 2**: Custom bootloader with RTC register-based partition selection
-3. **Stage 3**: Factory application with GUI framework selector
+### Three-Stage Boot Process
 
-### Factory-First Boot Behavior
+1. **Stage 1**: ESP-IDF ROM Bootloader (embedded in chip)
+2. **Stage 2**: ESP-IDF 2nd Stage Bootloader (reads RTC register, selects partition)
+3. **Stage 3**: Graphical Bootloader with LVGL GUI (firmware selection interface)
 
-The system boots into the factory application (Stage 3) by default, which presents a touch-enabled interface for selecting different GUI frameworks. When a user selects a framework:
+### Boot Flow
 
-1. **Application writes** boot request to RTC register (`LP_SYSTEM_REG_LP_STORE0_REG`)
-2. **System restarts** using `esp_restart()`
-3. **Custom bootloader reads** RTC register for boot request
-4. **Custom bootloader boots** the requested OTA partition (one-time only)
-5. **Bootloader clears** the RTC register
-6. **Next reboot defaults back to factory** (factory-first behavior)
+**Default Boot (No RTC Request):**
+```
+ROM Bootloader → 2nd Stage Bootloader → 3rd Stage Graphical Bootloader (LVGL GUI)
+```
+
+**Firmware Selection Boot (One-Time):**
+```
+1. User taps firmware button in LVGL GUI
+2. 3rd stage bootloader writes to RTC register: 0x00544551 | (partition_type << 24)
+3. 3rd stage bootloader calls esp_restart()
+4. 2nd stage bootloader reads RTC register
+5. 2nd stage bootloader boots selected OTA partition
+6. RTC register is cleared
+7. Next reboot returns to 3rd stage graphical bootloader
+```
+
+**After Subsequent Reboot:**
+```
+ROM Bootloader → 2nd Stage Bootloader → 3rd Stage Graphical Bootloader (LVGL GUI)
+```
 
 ## Project Structure
 
 ```
-├── bootloader_components/
+├── main/                           # 3rd stage bootloader (stored in factory_app partition)
+│   ├── lvgl_bootloader.c          # LVGL GUI and boot logic
+│   ├── firmware_flasher.c         # Firmware flashing engine
+│   ├── firmware_selector.c         # SD card firmware selection UI
+│   ├── firmware_validator.c        # Firmware integrity checking
+│   ├── firmware_storage.c         # Firmware metadata storage (FWST partition)
+│   ├── firmware_storage.h
+│   ├── firmware_storage_config.h  # Firmware storage configuration
+│   ├── partition_manager.c        # Partition table management
+│   ├── board_init.c               # Display and BSP initialization
+│   └── CMakeLists.txt
+├── bootloader_components/          # 2nd stage bootloader components (optional)
 │   └── main/
-│       ├── bootloader_start.c      # Custom bootloader entry point
 │       ├── bootloader_custom.c     # RTC-based boot request handling
-│       ├── bootloader_custom.h     # Bootloader API and data structures
-│       └── CMakeLists.txt          # Bootloader component configuration
-├── main/
-│   ├── graphical_bootloader.c      # Factory app with GUI
-│   ├── board_init.c                # Display and BSP initialization
-│   ├── board_init.h                # Display and BSP declarations
-│   ├── CMakeLists.txt              # Main application configuration
-│   ├── idf_component.yml           # Component dependencies
-│   └── Kconfig.projbuild           # Configuration options
-├── boot-knowledge.txt              # Technical documentation and storage options
+│       └── bootloader_custom.h
+├── simulator/                      # Simulator for desktop testing
+│   ├── main.c                     # Simulator entry point
+│   ├── mocks/                     # Mock implementations for ESP-IDF APIs
+│   ├── platform/                  # Platform-specific code
+│   └── build.sh                   # Simulator build script
 ├── partitions.csv                  # Custom partition table
-├── sdkconfig.defaults              # Default project configuration
-└── CMakeLists.txt                  # Top-level project configuration
+├── sdkconfig.defaults              # Default configuration
+└── README.md
 ```
 
-## Core Files
+## Partition Table
 
-### Bootloader Components
+| Name | Type | SubType | Offset | Size | Description |
+|------|------|---------|--------|------|-------------|
+| bootloader | data | - | 0x0 | 0x20000 (128KB) | ESP-IDF bootloader |
+| partition_table | data | - | 0x10000 | 0x1000 (4KB) | Partition table |
+| otadata | data | - | 0x11000 | 0x2000 (8KB) | OTA data |
+| bootloader_config | data | - | 0x12B000 | 0x11000 (68KB) | Bootloader config |
+| **firmware_storage** | data | - | 0x13C000 | 0x4000 (16KB) | **Firmware metadata (FWST)** |
+| factory_app | app | factory | 0x20000 | 0x100000 (1MB) | Factory app with GUI |
+| ota_0 | app | ota_0 | 0x120000 | 0x200000 (2MB) | OTA slot 0 |
+| ota_1 | app | ota_1 | 0x320000 | 0x200000 (2MB) | OTA slot 1 |
+| ota_2 | app | ota_2 | 0x520000 | 0x200000 (2MB) | OTA slot 2 |
+| ota_3 | app | ota_3 | 0x720000 | 0x200000 (2MB) | OTA slot 3 |
+| storage | data | spi_flash | 0x920000 | 0x600000 (6MB) | Internal flash storage |
+| sdcard | data | fat | 0xF20000 | 0x600000 (6MB) | SD card filesystem |
 
-#### `bootloader_start.c`
-Main bootloader entry point that:
-- Initializes hardware and ESP-IDF bootloader subsystem
-- Reads boot requests from RTC register
-- Implements partition selection logic
-- Handles request clearing for factory-first behavior
+## Firmware Storage (FWST)
 
-#### `bootloader_custom.c`
-**RTC-based boot request implementation**:
-- `bootloader_read_boot_request()`: Reads partition selection from RTC register
-- `bootloader_clear_boot_request()`: Clears processed requests from RTC
-- `bootloader_get_boot_partition()`: Maps partition types to actual partitions
-- **Uses ESP32-P4 reserved RTC register** (`LP_SYSTEM_REG_LP_STORE0_REG`)
+The firmware_storage partition at `0x13C000` stores firmware metadata using a custom format:
 
-#### `bootloader_custom.h`
-Defines the bootloader data structures:
-- `boot_request_t`: Structure for boot requests (magic, version, partition type)
-- Partition type constants (FACTORY, OTA_0, OTA_1)
-- RTC register and magic number definitions
-
-### Factory Application
-
-#### `main/graphical_bootloader.c`
-Primary factory application with:
-- touch interface for framework selection
-- **Direct RTC register access** for boot requests
-- Visual feedback during boot transitions
-- Error handling and restart functionality
-
-## Boot Flow
-
-### Normal Boot (No Request)
-```
-ESP-IDF ROM Bootloader → Custom Bootloader → Factory Application (GUI)
-```
-
-### OTA Selection Boot
-```
-1. User selects framework in GUI
-2. Factory app writes to RTC register: magic | (partition_type << 24)
-3. System restarts via esp_restart()
-4. Custom bootloader reads RTC register
-5. Custom bootloader extracts magic and partition type
-6. Custom bootloader clears RTC register (writes 0)
-7. Custom bootloader boots selected OTA partition
-```
-
-### Subsequent Boot (Returns to Factory)
-```
-ESP-IDF ROM Bootloader → Custom Bootloader → Factory Application (GUI)
-```
-
-## RTC Register Protocol
-
-### Boot Request Format
+### Header Format
 ```c
-// RTC register value: 0xPPTTTTTT
-// PP = Partition type (0=Factory, 1=OTA_0, 2=OTA_1)
-// TTTTTT = Magic number (0x00544551 = "BOOT" in ASCII)
-#define BOOT_REQUEST_MAGIC_RTC   0x00544551
-#define BOOT_REQUEST_RTC_REG     LP_SYSTEM_REG_LP_STORE0_REG
-
-// Example: Boot OTA_0 partition
-uint32_t rtc_value = BOOT_REQUEST_MAGIC_RTC | (1 << 24);  // 0x01544551
-REG_WRITE(BOOT_REQUEST_RTC_REG, rtc_value);
+typedef struct {
+    char magic[4];              // 'FWST' magic
+    uint32_t version;           // Version (currently 1)
+    uint32_t header_size;       // Size of header
+    uint32_t count;             // Number of firmware entries
+} firmware_storage_header_t;
 ```
 
-### RTC Register Advantages
-- **Available in bootloader context** (no component dependencies)
-- **Survives across reboots** (RTC memory)
-- **No flash wear** (register access)
-- **Simple 32-bit interface** (easy to encode/decode)
-- **Factory-first by default** (cleared after use)
+### Entry Format
+```c
+typedef struct {
+    char name[64];             // Firmware display name
+    uint32_t offset;           // Offset from firmware_storage base
+    uint32_t size;             // Firmware size in bytes
+    uint32_t crc32;            // CRC32 checksum
+    uint32_t flags;            // Flags (reserved)
+    uint32_t next_offset;      // Next entry offset (reserved)
+} firmware_storage_entry_t;
+```
 
-## Failed Approaches (For Reference)
+## Building
 
-### NVS Storage
-**Reason**: NVS APIs are **not available in bootloader context**
-- `nvs_flash_init()`, `nvs_open()`, `nvs_get_blob()` cause linker errors
-- Bootloader has limited component dependencies
-- Multiple attempts with different approaches all failed
+### Hardware (ESP32-P4)
 
-### Standard ESP-IDF OTA (`esp_ota_set_boot_partition()`)
-**Reason**: `app_update` component requires `esp_system` which is **not available in bootloader**
-- `esp_ota_set_boot_partition()` only works in application context
-- Bootloader cannot depend on `app_update` component
-- Would require complex bootloader rebuild configuration
-
-
-#### Manual Build
 ```bash
-git clone https://github.com/georgik/esp32-p4-graphical-bootloader.git
-cd esp32-p4-graphical-bootloader
-
-# Build and package
-./package.sh v1.0.0
-cd dist
-./flash-esp32_p4_function_ev_board.sh
-```
-
-## Prerequisites
-
-- **ESP-IDF v5.5** (for building from source)
-- **ESP32-P4 Function EV Board** with touchscreen
-- **16MB Flash** (recommended for optimal OTA storage)
-
-## Architecture Overview
-
-This project implements a **three-stage boot architecture** with **RTC-based boot requests** and **dynamic partition mapping**:
-
-1. **Stage 1**: ESP-IDF bootloader (embedded in ROM)
-2. **Stage 2**: Custom bootloader with dynamic partition discovery
-3. **Stage 3**: Factory application with GUI framework selector
-
-
-## Build Configuration
-
-### Key Settings (`sdkconfig.defaults`)
-- `CONFIG_BOOTLOADER_SIZE_IN_KB=32`: Increased bootloader size for custom logic
-- `CONFIG_PARTITION_TABLE_OFFSET=0x10000`: Adjusted for 32KB bootloader
-- `CONFIG_PARTITION_TABLE_CUSTOM=y`: Custom partition table usage
-- ESP32-P4 target configuration (`CONFIG_IDF_TARGET=esp32p4`)
-
-### Bootloader Component Dependencies
-```cmake
-idf_component_register(
-    SRCS
-        "bootloader_start.c"
-        "bootloader_custom.c"
-    INCLUDE_DIRS
-        "."
-    REQUIRES
-        bootloader
-        bootloader_support
-        esp_partition
-)
-```
-
-### Application Component Dependencies
-```cmake
-idf_component_register(
-    SRCS
-        "graphical_bootloader.c"
-        "board_init.c"
-    INCLUDE_DIRS
-        "."
-    PRIV_REQUIRES
-        espressif__esp_lcd_touch
-        espressif__esp32_p4_function_ev_board_noglib
-        esp_partition
-        esp_timer
-        esp_system
-)
-```
-
-## Usage
-
-### Building from Source
-```bash
-# Clone the repository
-git clone https://github.com/georgik/esp32-p4-graphical-bootloader.git
-cd esp32-p4-graphical-bootloader
-
 # Setup ESP-IDF environment
-source /path/to/esp-idf/export.sh
+export IDF_PATH=/path/to/esp-idf
+source $IDF_PATH/export.sh
 
 # Build the project
 idf.py build
 
-# Or flash directly
+# Flash to device
 idf.py flash
-```
 
-### Monitoring Output
-```bash
+# Monitor output
 idf.py monitor
 ```
 
-### Web Flashing (ESP-Launchpad)
-The web-based flashing interface is also available at: https://georgik.github.io/esp32-p4-graphical-bootloader/
+### Simulator (macOS/Linux)
 
-### Downloading Releases
-Pre-built binaries are available on GitHub:
-- **Latest Release**: https://github.com/georgik/esp32-p4-graphical-bootloader/releases/latest
-- **All Releases**: https://github.com/georgik/esp32-p4-graphical-bootloader/releases
+```bash
+cd simulator
+./build.sh
 
-## Boot Request API
+# Run simulator with flash image
+./run.sh --load-image flash-ew-qt-opentyrian-combined.bin
 
-### Direct RTC Register Access
-Applications can request specific boot partitions directly:
+# Or run without flash image
+./build/simulator
+```
 
+## Usage
+
+### Flashing Firmware from SD Card
+
+1. Copy `.bin` firmware files to `/sdcard/firmwares/` on SD card
+2. Insert SD card into ESP32-P4 board
+3. Tap "Load from SD Card" button in LVGL GUI
+4. Select firmware(s) to flash
+5. Tap "Flash" button to start flashing
+6. Progress will be displayed during flashing
+7. After flashing, firmware button will appear on main screen
+
+### Booting Firmware
+
+1. Tap firmware button on main screen
+2. System writes RTC register and restarts
+3. Custom bootloader reads RTC register
+4. Selected firmware boots (one-time only)
+5. After next reboot, returns to GUI
+
+## RTC Boot Protocol
+
+### Register Definition
 ```c
-#include "soc/lp_system_reg.h"
-#include "soc/soc.h"  // For REG_WRITE macro
-
-// RTC register constants
 #define BOOT_REQUEST_RTC_REG     LP_SYSTEM_REG_LP_STORE0_REG
-#define BOOT_REQUEST_MAGIC_RTC   0x00544551  // 'BOOT' magic
+#define BOOT_REQUEST_MAGIC_RTC   0x00544551  // 'BOOT' in ASCII
+```
 
-// Request boot from OTA_0 on next restart
-uint32_t partition_type = 1;  // 0=Factory, 1=OTA_0, 2=OTA_1
+### Encoding Format
+```
+Bit 31-24: Partition type (0=Factory, 1=OTA_0, 2=OTA_1, 3=OTA_2, 4=OTA_3)
+Bit 23-0:  Magic number (0x00544551)
+```
+
+### Example Usage
+```c
+// Boot OTA_0 partition
+uint32_t partition_type = 1;
 uint32_t rtc_value = BOOT_REQUEST_MAGIC_RTC | (partition_type << 24);
 REG_WRITE(BOOT_REQUEST_RTC_REG, rtc_value);
 
-// Restart to trigger bootloader
+// Wait and restart
+vTaskDelay(pdMS_TO_TICKS(1000));
 esp_restart();
 ```
 
 ### Partition Type Mapping
-```c
-// Partition types for RTC register encoding
-#define BOOT_PARTITION_FACTORY  0
-#define BOOT_PARTITION_OTA_0    1
-#define BOOT_PARTITION_OTA_1    2
+| Partition Type | Value | Partition Subtype |
+|----------------|-------|-------------------|
+| FACTORY | 0 | ESP_PARTITION_SUBTYPE_APP_FACTORY |
+| OTA_0 | 1 | ESP_PARTITION_SUBTYPE_APP_OTA_0 |
+| OTA_1 | 2 | ESP_PARTITION_SUBTYPE_APP_OTA_1 |
+| OTA_2 | 3 | ESP_PARTITION_SUBTYPE_APP_OTA_2 |
+| OTA_3 | 4 | ESP_PARTITION_SUBTYPE_APP_OTA_3 |
+
+## Key Features
+
+### 1. Firmware Storage Partition
+- Custom partition format with 'FWST' magic
+- Stores firmware name, offset, size, and CRC32
+- Supports up to 10 firmware entries (MAX_FIRMWARE_ENTRIES)
+- Flash erase before initialization (hardware requirement)
+
+### 2. SD Card Integration
+- VFFAT filesystem support
+- Automatic scanning of `/sdcard/firmwares/`
+- Progress tracking during flashing
+- Error handling and recovery
+
+### 3. LVGL Interface
+- Touch-enabled buttons
+- Progress bars for flash operations
+- Status messages and error handling
+- Support for 1024x600 MIPI DSI display
+
+### 4. Watchdog-Friendly
+- Task yielding during flash operations (prevents WDT timeout)
+- LVGL updates with proper delays
+- Safe long-running operations
+
+## Simulator
+
+The simulator provides a complete development environment:
+
+### Features
+- **Flash Emulator**: Memory-mapped flash simulation
+- **VFS Translation**: `/sdcard` → `./sdcard/` directory mapping
+- **Mock APIs**: ESP-IDF API implementations for desktop
+- **LVGL Desktop**: Native SDL2-based rendering
+- **CLI Tools**: Flash inspection and firmware management
+
+### Build Requirements
+- CMake 3.16+
+- SDL2 development libraries
+- pthread and standard C libraries
+
+### Simulator-Specific Files
+```
+simulator/
+├── mocks/                    # ESP-IDF API mocks
+│   ├── esp_flash_mock.h
+│   ├── nvs_mock.c           # NVS emulation
+│   ├── firmware_storage_mock.c  # Firmware storage emulation
+│   └── vfs_mock.c           # VFS path translation
+├── platform/                 # Platform-specific code
+│   ├── flash_emulator.c     # Flash memory emulation
+│   └── display_sdl2.c       # SDL2 display driver
+└── build.sh                 # Build script
 ```
 
-## Error Handling
-
-### Bootloader Error Recovery
-- **Invalid RTC magic value** → Boots factory partition
-- **Invalid partition type** → Defaults to factory partition
-- **No RTC request present** → Boots factory partition
-- **Corrupted partition data** → Falls back to factory partition
-
-### Application Error Handling
-- **RTC register access failures** → System logs error, continues
-- **Invalid partition indices** → Shows error state, doesn't restart
-- **Hardware failures** → Graceful degradation to factory boot
-
-## Debugging
-
-### Bootloader Logs
-Monitor for these key messages:
-```
-I (xxx) bootloader_custom: === Custom Bootloader Active (RTC-based) ===
-I (xxx) bootloader_custom: RTC store register value: 0x01544551
-I (xxx) bootloader_custom: RTC boot request found: magic=0x00544551, partition_type=1
-I (xxx) bootloader_custom: Boot request cleared - clearing RTC register
-```
+## Troubleshooting
 
 ### Common Issues
-1. **No boot request detected**: Check RTC register write format
-2. **Wrong partition boots**: Verify partition type mapping
-3. **Factory doesn't load**: Check partition table integrity
-4. **Boot loop**: RTC register not being cleared properly
 
-## Integration Notes
+**1. "No firmware applications found"**
+- Flash firmware from SD card first
+- Check SD card is mounted: Look for "SD card firmware directory found" log
+- Verify firmware_storage partition: Look for "Found X firmware(s)" log
 
-### Adding New OTA Applications
-1. Flash application to appropriate OTA partition (`ota_0` or `ota_1`)
-2. Update GUI framework mapping in `graphical_bootloader.c` if needed
-3. Partition type mapping is handled in RTC bootloader logic
-4. No changes needed to bootloader for new OTA apps
+**2. Watchdog timeout during flashing**
+- Check for `vTaskDelay()` calls in firmware_flasher.c
+- Ensure flash operations yield every 64KB
+- Look for "Flash progress: X%" logs
 
-### Extending Boot Request System
-The RTC register protocol can be extended:
-- Use additional reserved RTC registers for more data
-- Modify encoding format for complex boot requests
-- Add additional validation magic numbers
-- Implement request queuing if needed
+**3. RTC boot not working**
+- Verify RTC register write: Look for "RTC register updated: 0x..." log
+- Check partition_type calculation
+- Ensure custom bootloader is reading RTC register
+
+**4. Partition iterator infinite loop**
+- Check for proper iterator usage: `esp_partition_next(it)`
+- Verify iterator is released: `esp_partition_iterator_release(it)`
+- Look for "Partition iteration completed" log
+
+**5. Firmware storage not found**
+- Check flash erase on first write: "Erasing firmware storage region"
+- Verify magic number: 'FWST' (0x46545354)
+- Check offset: Should be 0x13C000
+
+### Debug Logs
+
+**Successful Firmware Flash:**
+```
+I (xxx) firmware_storage: Adding firmware entry to storage: firmware.bin @ offset 0x1F4000
+I (xxx) firmware_storage: Initializing new firmware storage
+I (xxx) firmware_storage: Erasing firmware storage region at 0x13C000
+I (xxx) firmware_storage: Writing entry 0 at offset 0x13C03C: firmware.bin (1399952 bytes, CRC32: 0xEBB6C042)
+I (xxx) firmware_storage: ✓ Firmware entry added: firmware.bin (total: 1 entries)
+```
+
+**Successful Boot Button Press:**
+```
+I (xxx) lvgl_bootloader: Booting firmware 0: firmware.bin @ address 0x330000
+I (xxx) lvgl_bootloader: Searching for partition containing address 0x330000...
+I (xxx) lvgl_bootloader: Partition iterator created: 0x...
+I (xxx) lvgl_bootloader: [1] Checking partition: factory_app (0x20000 - 0x120000)
+I (xxx) lvgl_bootloader: [2] Checking partition: ota_0 (0x120000 - 0x320000)
+I (xxx) lvgl_bootloader: Found matching partition: ota_0
+I (xxx) lvgl_bootloader: Partition found successfully, continuing with RTC boot...
+I (xxx) lvgl_bootloader: Booting from partition: ota_0 (subtype: 1)
+I (xxx) lvgl_bootloader: RTC register updated: 0x01544551 for partition type 1 (ota_0)
+I (xxx) lvgl_bootloader: System will boot from ota_0 after restart (one-time boot via RTC)
+```
 

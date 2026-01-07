@@ -19,9 +19,6 @@
 #include "lvgl_bootloader.h"
 #include "sd_ota.h"
 #include "vdma_protection.h"
-#include "nvs_flash.h"
-#include "nvs.h"
-#include "firmware_metadata.h"
 
 static const char *TAG = "main";
 
@@ -135,38 +132,8 @@ static esp_err_t initialize_system(void)
 {
     ESP_LOGI(TAG, "Initializing ESP32-P4 LVGL bootloader...");
 
-    // Initialize NVS first - needed for storing firmware configuration
-    ESP_LOGI(TAG, "Initializing NVS...");
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition needs to be erased, erasing...");
-        ret = nvs_flash_erase();
-        if (ret == ESP_OK) {
-            ret = nvs_flash_init();
-        }
-    }
-
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize NVS: %s", esp_err_to_name(ret));
-        // Continue without NVS - firmware list won't persist
-    } else {
-        ESP_LOGI(TAG, "NVS initialized successfully");
-
-        // Initialize firmware metadata module
-        ret = firmware_metadata_init();
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to initialize firmware metadata: %s", esp_err_to_name(ret));
-            // Continue anyway - metadata is optional
-        } else {
-            ESP_LOGI(TAG, "Firmware metadata initialized");
-
-            // Print existing firmware metadata on boot
-            firmware_metadata_print_all();
-        }
-    }
-
     // Initialize BSP (includes LVGL initialization)
-    ret = board_init_display();
+    esp_err_t ret = board_init_display();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize display: %s", esp_err_to_name(ret));
         return ret;
@@ -174,14 +141,8 @@ static esp_err_t initialize_system(void)
 
     ESP_LOGI(TAG, "Display initialized successfully");
 
-    // Initialize LVGL bootloader UI
-    ret = lvgl_bootloader_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize LVGL bootloader: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // Initialize SD card OTA
+    // Initialize SD card FIRST (before LVGL bootloader)
+    // The firmware selector needs /sdcard to be mounted
     ret = sd_ota_init();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "SD card OTA initialization failed: %s", esp_err_to_name(ret));
@@ -191,6 +152,13 @@ static esp_err_t initialize_system(void)
         sd_ota_set_progress_callback(ota_progress_callback);
         sd_ota_set_status_callback(ota_status_callback);
         update_status("Ready - SD card available");
+    }
+
+    // Initialize LVGL bootloader UI (after SD card is mounted)
+    ret = lvgl_bootloader_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize LVGL bootloader: %s", esp_err_to_name(ret));
+        return ret;
     }
 
     ESP_LOGI(TAG, "System initialization complete");

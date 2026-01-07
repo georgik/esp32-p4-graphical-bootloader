@@ -5,6 +5,7 @@
 
 #include "firmware_selector.h"
 #include "firmware_storage.h"
+#include "firmware_storage_config.h"
 #include "firmware_validator.h"
 #include "partition_manager.h"
 #include "firmware_flasher.h"
@@ -12,11 +13,11 @@
 #include "partition_visualizer.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_flash.h"
 #include "esp_vfs_fat.h"
-#include "nvs_flash.h"
-#include "nvs.h"
 #include <sys/stat.h>
 #include <dirent.h>
+#include <errno.h>
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
@@ -63,11 +64,30 @@ esp_err_t firmware_selector_init(firmware_selector_t* selector)
     // Initialize structure
     memset(selector, 0, sizeof(firmware_selector_t));
 
+    // Debug: Log SD card root directory contents
+    ESP_LOGI(TAG, "Checking SD card root directory: /sdcard");
+    DIR* root_dir = opendir("/sdcard");
+    if (root_dir) {
+        ESP_LOGI(TAG, "SD card root directory opened successfully");
+        struct dirent* entry;
+        int file_count = 0;
+        while ((entry = readdir(root_dir)) != NULL && file_count < 20) {
+            ESP_LOGI(TAG, "  - /sdcard/%s", entry->d_name);
+            file_count++;
+        }
+        closedir(root_dir);
+        ESP_LOGI(TAG, "Total %d entries in /sdcard root", file_count);
+    } else {
+        ESP_LOGE(TAG, "Failed to open SD card root directory: /sdcard");
+    }
+
     // Ensure firmware directory exists
     struct stat st;
     if (stat(FIRMWARE_DIRECTORY, &st) != 0) {
         ESP_LOGW(TAG, "Firmware directory not found: %s", FIRMWARE_DIRECTORY);
         // Note: Directory creation could be added here if needed
+    } else {
+        ESP_LOGI(TAG, "Firmware directory exists: %s", FIRMWARE_DIRECTORY);
     }
 
     selector->is_initialized = true;
@@ -87,24 +107,40 @@ esp_err_t firmware_selector_scan_directory(firmware_selector_t* selector)
     DIR* dir = opendir(FIRMWARE_DIRECTORY);
     if (!dir) {
         ESP_LOGE(TAG, "Failed to open firmware directory: %s", FIRMWARE_DIRECTORY);
+        ESP_LOGE(TAG, "  errno=%d (%s)", errno, strerror(errno));
         return ESP_ERR_NOT_FOUND;
     }
+
+    ESP_LOGI(TAG, "Firmware directory opened successfully, scanning for .bin files...");
 
     selector->firmware_count = 0;
     selector->selected_count = 0;
     selector->total_selected_size = 0;
 
     struct dirent* entry;
-    while ((entry = readdir(dir)) != NULL && selector->firmware_count < MAX_FIRMWARE_COUNT) {
+    int total_entries = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        total_entries++;
+
         // Skip hidden files (starting with .) - macOS creates these metadata files
         if (entry->d_name[0] == '.') {
             ESP_LOGD(TAG, "Skipping hidden file: %s", entry->d_name);
             continue;
         }
 
+        ESP_LOGI(TAG, "  Found file: %s", entry->d_name);
+
         // Check for .bin extension
         if (!firmware_has_valid_extension(entry->d_name)) {
+            ESP_LOGD(TAG, "    Skipping (no .bin extension)");
             continue;
+        }
+
+        ESP_LOGI(TAG, "    Has .bin extension, adding to list");
+
+        if (selector->firmware_count >= MAX_FIRMWARE_COUNT) {
+            ESP_LOGW(TAG, "    Reached maximum firmware count (%d), skipping remaining files", MAX_FIRMWARE_COUNT);
+            break;
         }
 
         // Build full file path
@@ -161,7 +197,12 @@ esp_err_t firmware_selector_scan_directory(firmware_selector_t* selector)
 
     closedir(dir);
 
-    ESP_LOGI(TAG, "Firmware scan complete: %lu files found", (unsigned long)selector->firmware_count);
+    ESP_LOGI(TAG, "Firmware scan complete:");
+    ESP_LOGI(TAG, "  Total entries scanned: %d", total_entries);
+    ESP_LOGI(TAG, "  Valid .bin files found: %lu", (unsigned long)selector->firmware_count);
+    if (selector->firmware_count == 0) {
+        ESP_LOGW(TAG, "  No valid firmware files found in %s", FIRMWARE_DIRECTORY);
+    }
     return ESP_OK;
 }
 
@@ -317,9 +358,6 @@ static void fw_selector_modal_ok_cb(lv_event_t* e)
         // Switch back to main screen and refresh it
         switch_screen(SCREEN_MAIN);
 
-        // Small delay to ensure NVS operations are complete
-        vTaskDelay(pdMS_TO_TICKS(100));
-
         refresh_main_screen();
 
         ESP_LOGI(TAG, "Modal closed, main screen refreshed");
@@ -440,21 +478,6 @@ static void fw_flash_status_callback(flash_state_t state, flash_result_t result,
                 lv_obj_move_foreground(g_active_firmware_selector->completion_modal);
 
                 ESP_LOGI(TAG, "Completion modal shown successfully");
-
-                // Force NVS reload to ensure main screen can read updated data
-                ESP_LOGI(TAG, "Forcing NVS data reload...");
-                esp_err_t nvs_err = nvs_flash_deinit();
-                if (nvs_err == ESP_OK) {
-                    vTaskDelay(pdMS_TO_TICKS(100)); // Slightly longer delay to ensure all writes complete
-                    nvs_err = nvs_flash_init();
-                    if (nvs_err != ESP_OK) {
-                        ESP_LOGW(TAG, "Failed to reinitialize NVS: %s", esp_err_to_name(nvs_err));
-                    } else {
-                        ESP_LOGI(TAG, "NVS reinitialized successfully, data should be reloaded");
-                    }
-                } else {
-                    ESP_LOGW(TAG, "Failed to deinit NVS: %s", esp_err_to_name(nvs_err));
-                }
             }
         } else {
             ESP_LOGW(TAG, "Firmware flashing completed with errors: result=%d", result);
@@ -1056,50 +1079,26 @@ esp_err_t firmware_selector_store_firmware_config(firmware_selector_t* selector)
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "Storing firmware configuration in NVS for boot menu");
-
-    // Initialize NVS system first (in case not already initialized)
-    esp_err_t nvs_init_err = nvs_flash_init();
-    if (nvs_init_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_init_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS needs to be erased, doing that...");
-        nvs_flash_erase();
-        nvs_init_err = nvs_flash_init();
-    } else if (nvs_init_err == ESP_ERR_NVS_NOT_INITIALIZED) {
-        ESP_LOGD(TAG, "NVS not initialized, trying to initialize...");
-        nvs_init_err = nvs_flash_init();
-    }
-
-    if (nvs_init_err != ESP_OK && nvs_init_err != ESP_ERR_NVS_NO_FREE_PAGES && nvs_init_err != ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGE(TAG, "Error initializing NVS flash: %s", esp_err_to_name(nvs_init_err));
-        return nvs_init_err;
-    }
-
-    // Open NVS namespace
-    nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open("firmware_config", NVS_READWRITE, &nvs_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error opening NVS namespace: %s", esp_err_to_name(err));
-        return err;
-    }
+    ESP_LOGI(TAG, "Storing firmware configuration in firmware_storage partition for boot menu");
 
     // Get selected firmwares
     firmware_info_t* selected_firmware[MAX_FIRMWARE_COUNT];
     uint32_t selected_count = 0;
-    err = firmware_selector_get_selected(selector, selected_firmware, MAX_FIRMWARE_COUNT, &selected_count);
+    esp_err_t err = firmware_selector_get_selected(selector, selected_firmware, MAX_FIRMWARE_COUNT, &selected_count);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get selected firmware: %s", esp_err_to_name(err));
-        nvs_close(nvs_handle);
         return err;
     }
 
-    // Clear existing firmware entries
-    err = nvs_erase_all(nvs_handle);
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGW(TAG, "Failed to erase NVS entries: %s", esp_err_to_name(err));
-    }
+    // Clear existing firmware storage by erasing the header
+    // This will re-initialize the storage on first add
+    firmware_storage_header_t empty_header;
+    memset(&empty_header, 0, sizeof(empty_header));
+    // Write invalid magic to clear storage
+    memcpy(empty_header.magic, "CLR_", 4);
+    esp_flash_write(NULL, &empty_header, FIRMWARE_STORAGE_OFFSET, sizeof(empty_header));
 
     // Store each selected firmware
-    char key[32];
     for (uint32_t i = 0; i < selected_count; i++) {
         firmware_info_t* firmware = selected_firmware[i];
 
@@ -1110,66 +1109,22 @@ esp_err_t firmware_selector_store_firmware_config(firmware_selector_t* selector)
 
         partition_info_t* partition = (partition_info_t*)firmware->assigned_partition;
 
-        // Store filename
-        snprintf(key, sizeof(key), "fw_%d_filename", (int)i);
-        err = nvs_set_str(nvs_handle, key, firmware->display_name);
+        // Calculate offset from firmware_storage base to OTA partition
+        uint32_t partition_offset = partition->offset - FIRMWARE_STORAGE_OFFSET;
+
+        // Add entry to firmware_storage
+        err = firmware_storage_add_entry(firmware->display_name, partition_offset, firmware->size, firmware->crc32);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to store filename for firmware %d: %s", (int)i, esp_err_to_name(err));
+            ESP_LOGE(TAG, "Failed to store firmware %d in storage: %s", (int)i, esp_err_to_name(err));
             continue;
         }
 
-        // Store OTA partition name
-        snprintf(key, sizeof(key), "fw_%d_partition", (int)i);
-        err = nvs_set_str(nvs_handle, key, partition->name);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to store partition for firmware %d: %s", (int)i, esp_err_to_name(err));
-            continue;
-        }
-
-        // Store OTA partition offset
-        snprintf(key, sizeof(key), "fw_%d_offset", (int)i);
-        err = nvs_set_u32(nvs_handle, key, partition->offset);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to store offset for firmware %d: %s", (int)i, esp_err_to_name(err));
-            continue;
-        }
-
-        // Store firmware size
-        snprintf(key, sizeof(key), "fw_%d_size", (int)i);
-        err = nvs_set_u32(nvs_handle, key, firmware->size);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to store size for firmware %d: %s", (int)i, esp_err_to_name(err));
-            continue;
-        }
-
-        // Store CRC32 for integrity checking
-        snprintf(key, sizeof(key), "fw_%d_crc32", (int)i);
-        err = nvs_set_u32(nvs_handle, key, firmware->crc32);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to store CRC32 for firmware %d: %s", (int)i, esp_err_to_name(err));
-            continue;
-        }
-
-        ESP_LOGI(TAG, "Stored firmware %d: %s -> %s (0x%08x, %d bytes, CRC32: 0x%08X)",
-                 (int)i, firmware->display_name, partition->name, partition->offset, firmware->size, firmware->crc32);
+        ESP_LOGI(TAG, "Stored firmware %d: %s -> %s (offset: 0x%x, %d bytes, CRC32: 0x%08X)",
+                 (int)i, firmware->display_name, partition->name, partition_offset, firmware->size, firmware->crc32);
     }
 
-    // Store firmware count
-    err = nvs_set_u32(nvs_handle, "firmware_count", selected_count);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to store firmware count: %s", esp_err_to_name(err));
-    }
-
-    // Commit changes
-    err = nvs_commit(nvs_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to commit NVS changes: %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGI(TAG, "Successfully stored %d firmware(s) in NVS", (int)selected_count);
-    }
-
-    nvs_close(nvs_handle);
-    return err;
+    ESP_LOGI(TAG, "✓ Stored %u firmware configuration(s) in firmware_storage", selected_count);
+    return ESP_OK;
 }
 
 esp_err_t firmware_selector_scan_storage(firmware_selector_t* selector)

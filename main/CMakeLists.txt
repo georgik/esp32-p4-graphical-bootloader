@@ -10,7 +10,6 @@ idf_component_register(
         "partition_manager.c"
         "firmware_flasher.c"
         "partition_visualizer.c"
-        "firmware_metadata.c"
         "firmware_storage.c"
     INCLUDE_DIRS
         "."
@@ -21,13 +20,12 @@ idf_component_register(
         esp_partition
         esp_timer
         esp_system
+        esp_rom                 # For MD5 checksum calculation (ESP-IDF 6.1+)
         spiffs                 # For configuration storage
         app_update             # For OTA operations
         esp_app_format         # For OTA operations
         fatfs                  # For SD card filesystem
         sdmmc                  # For SD card access
         spi_flash              # For direct flash access
-        nvs_flash              # For firmware configuration storage
-        mbedtls                # For MD5 checksum calculation
         # esp_raylib_port is pulled in via georgik__raylib dependency
 )

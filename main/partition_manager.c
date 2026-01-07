@@ -10,7 +10,7 @@
 #include "esp_app_format.h"
 #include "esp_flash_partitions.h"
 #include "esp_flash.h"
-#include "mbedtls/md5.h"
+#include "esp_rom_md5.h"
 #include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
@@ -375,17 +375,16 @@ esp_err_t partition_manager_create_binary(const partition_table_layout_t* layout
     memcpy(md5_entry->label, md5_magic_pattern, sizeof(md5_magic_pattern));
 
     // Calculate proper MD5 checksum of all partition entries (excluding MD5 entry itself)
-    mbedtls_md5_context md5_ctx;
-    mbedtls_md5_init(&md5_ctx);
-    mbedtls_md5_starts(&md5_ctx);
+    // Using ESP-ROM MD5 for calculation
+    md5_context_t md5_ctx;
+    esp_rom_md5_init(&md5_ctx);
 
     // Hash all partition entries (32 bytes each, layout->partition_count entries)
-    mbedtls_md5_update(&md5_ctx, (const unsigned char*)partition_entries,
+    esp_rom_md5_update(&md5_ctx, (const unsigned char*)partition_entries,
                       layout->partition_count * sizeof(esp_partition_info_t));
 
     unsigned char md5_hash[16];
-    mbedtls_md5_finish(&md5_ctx, md5_hash);
-    mbedtls_md5_free(&md5_ctx);
+    esp_rom_md5_final(md5_hash, &md5_ctx);
 
     // CRITICAL: Store MD5 hash in label + 16 (after the magic pattern)
     // This matches the esp-idf-part format: first 16 bytes magic, next 16 bytes hash

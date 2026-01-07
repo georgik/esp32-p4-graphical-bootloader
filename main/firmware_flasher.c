@@ -7,7 +7,8 @@
 #include "partition_manager.h"
 #include "firmware_validator.h"
 #include "firmware_selector.h"
-#include "firmware_metadata.h"
+#include "firmware_storage.h"
+#include "firmware_storage_config.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_flash.h"
@@ -17,7 +18,7 @@
 #include "esp_crc.h"
 #include "esp_flash.h"
 #include "esp_flash_partitions.h"
-#include "mbedtls/md5.h"
+#include "esp_rom_md5.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -182,9 +183,6 @@ static void flash_task_cleanup(void)
     g_flash_task_handle = NULL;
     xSemaphoreGive(g_flash_mutex);
 
-    // Status callback would be called here if we had one
-    notify_status(g_flash_state, g_flash_result, "Flash operation finished");
-
     ESP_LOGI(TAG, "Flash task finished with result: %d", g_flash_result);
 }
 
@@ -256,6 +254,17 @@ static void flash_task(void* arg)
         }
     }
     ESP_LOGI(TAG, "Assigned partitions to %d firmware(s)", assigned_count);
+
+    // Store firmware configuration in firmware_storage partition NOW (before flashing)
+    // This ensures metadata is available even if flashing fails or crashes
+    ESP_LOGI(TAG, "Storing firmware configuration in firmware_storage partition");
+    ret = firmware_selector_store_firmware_config(g_flash_config.firmware_selector);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to store firmware config in firmware_storage: %s", esp_err_to_name(ret));
+        // Continue anyway - don't fail the operation for metadata storage issues
+    } else {
+        ESP_LOGI(TAG, "Firmware configuration stored successfully");
+    }
 
     // Validate generated partition layout
     bool layout_valid = false;
@@ -345,25 +354,27 @@ static void flash_task(void* arg)
         return;
     }
 
-    // Success! Store firmware configuration and notify completion
+    // Success! Notify completion
     g_flash_result = FLASH_RESULT_SUCCESS;
     g_flash_state = FLASH_STATE_COMPLETED;
 
-    // Store firmware configuration in NVS for boot menu
-    ESP_LOGI(TAG, "Storing firmware configuration in NVS");
-    ret = firmware_selector_store_firmware_config(g_flash_config.firmware_selector);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to store firmware config in NVS: %s", esp_err_to_name(ret));
-        // Don't fail the operation - continue with success notification
-    } else {
-        ESP_LOGI(TAG, "Firmware configuration stored successfully");
-    }
+    // Note: Firmware configuration was already stored BEFORE flashing
+    // (see line 261) - so it's available even if flashing failed
 
     update_statistics();
     notify_status(g_flash_state, g_flash_result, "All firmware flashed successfully!");
 
+    // Yield to LVGL to allow it to process the completion status
+    // This prevents watchdog timeout while task deletion is pending
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     // Final cleanup
     flash_task_cleanup();
+
+    // Yield one more time to ensure LVGL finishes processing all pending events
+    // before this task deletes itself
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     vTaskDelete(NULL);
 }
 
@@ -477,7 +488,13 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
 
     esp_err_t ret;
 
-    ESP_LOGI(TAG, "Writing firmware to partition %s (with erase-on-demand)", ota_partition->label);
+    ESP_LOGI(TAG, "Writing firmware to partition %s (with automatic erase-on-write)", ota_partition->label);
+
+    // NOTE: We don't explicitly erase the partition - ESP32 flash does erase-on-write automatically
+    // This is faster because:
+    // 1. Only sectors that are actually written get erased
+    // 2. No need to erase the entire partition upfront
+    // 3. Flash controller handles erase efficiently during write
 
     // Flash firmware in chunks
     const uint32_t chunk_size = 4096; // 4KB chunks
@@ -534,14 +551,64 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
 
     // Erase the entire OTA partition before writing
     ESP_LOGI(TAG, "Erasing OTA partition at 0x%08x (size: 0x%08x)", ota_partition->address, ota_partition->size);
-    ret = esp_flash_erase_region(NULL, ota_partition->address, ota_partition->size);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to erase OTA partition: %s", esp_err_to_name(ret));
-        free(buffer);
-        fclose(file);
-        return ret;
+
+    // Set state to flashing (erasing is part of the flashing process)
+    g_flash_state = FLASH_STATE_FLASHING_FIRMWARE;
+
+    // Erase in chunks to show progress (flash erase is slow, especially for large partitions)
+    // IMPORTANT: Use 4KB chunks (one flash sector) to prevent watchdog timeout
+    // Flash erase is MUCH slower than write - 64KB erase can take 2-3 seconds!
+    const uint32_t erase_chunk_size = 4 * 1024; // 4KB chunks (one flash sector)
+    uint32_t bytes_erased = 0;
+    uint32_t total_erase_size = ota_partition->size;
+
+    ESP_LOGI(TAG, "Erasing OTA partition in 4KB chunks to prevent watchdog timeout...");
+
+    int64_t erase_start_time = esp_timer_get_time();
+
+    while (bytes_erased < total_erase_size) {
+        uint32_t chunk_size = erase_chunk_size;
+        if (bytes_erased + chunk_size > total_erase_size) {
+            chunk_size = total_erase_size - bytes_erased;
+        }
+
+        // Log erase start for diagnostics
+        int64_t chunk_start = esp_timer_get_time();
+        ESP_LOGV(TAG, "Erasing chunk at 0x%x size=%u", ota_partition->address + bytes_erased, chunk_size);
+
+        // Erase this chunk (4KB sector - typically 100-200ms)
+        ret = esp_flash_erase_region(NULL, ota_partition->address + bytes_erased, chunk_size);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to erase OTA partition chunk at offset 0x%x: %s",
+                     bytes_erased, esp_err_to_name(ret));
+            free(buffer);
+            fclose(file);
+            return ret;
+        }
+
+        int64_t chunk_time = esp_timer_get_time() - chunk_start;
+        ESP_LOGV(TAG, "Chunk erase took %lld ms", chunk_time / 1000);
+
+        bytes_erased += chunk_size;
+
+        // Update erase progress every 64KB to avoid too many UI updates
+        if (bytes_erased % (64 * 1024) == 0 || bytes_erased == total_erase_size) {
+            uint8_t erase_progress = (bytes_erased * 100) / total_erase_size;
+            int64_t elapsed = (esp_timer_get_time() - erase_start_time) / 1000;
+            ESP_LOGI(TAG, "Erase progress: %d%% (%d/%d bytes) [elapsed: %lldms]",
+                     erase_progress, bytes_erased, total_erase_size, elapsed);
+
+            // Update UI: send operation name as status message, progress bar shows percentage
+            notify_progress(firmware_index + 1, erase_progress, "Erasing");
+        }
+
+        // CRITICAL: Yield after EVERY 4KB erase chunk
+        // Flash erase is very slow (100-200ms per sector), so we must yield frequently
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
-    ESP_LOGI(TAG, "OTA partition erased successfully");
+
+    int64_t total_erase_time = (esp_timer_get_time() - erase_start_time) / 1000;
+    ESP_LOGI(TAG, "OTA partition erased successfully [total time: %lldms]", total_erase_time);
 
     // If we modified the header (for truncation), write it first
     if (total_bytes < (uint32_t)file_size && header_read == sizeof(header_buffer)) {
@@ -587,9 +654,12 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
 
         bytes_flashed += bytes_read;
 
-        // Update progress (every 64KB or when complete)
+        // Calculate progress
+        uint8_t progress = (bytes_flashed * 100) / total_bytes;
+
+        // Update progress, statistics, and yield EVERY 64KB (not every 4KB!)
+        // LVGL can't handle updates every 4KB - it causes watchdog timeout
         if (bytes_flashed % (64 * 1024) == 0 || bytes_flashed == total_bytes) {
-            uint8_t progress = (bytes_flashed * 100) / total_bytes;
             ESP_LOGI(TAG, "Flash progress: %d%% (%d/%d bytes)", progress, bytes_flashed, total_bytes);
 
             // Update statistics
@@ -598,10 +668,15 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
             g_flash_stats.written_bytes = bytes_flashed;
             xSemaphoreGive(g_flash_mutex);
 
-            // Call progress callback
-            ESP_LOGD(TAG, "Calling notify_progress: firmware=%d, progress=%d", firmware_index + 1, progress);
+            // Update UI progress
             notify_progress(firmware_index + 1, progress,
                            bytes_flashed == total_bytes ? "Finalizing" : "Flashing");
+
+            // Yield to other tasks
+            vTaskDelay(pdMS_TO_TICKS(10));
+        } else {
+            // Still yield every chunk, but don't spam LVGL with updates
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
 
@@ -652,62 +727,8 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
         ESP_LOGI(TAG, "Firmware verification successful");
     }
 
-    // Store firmware metadata in NVS
-    ESP_LOGI(TAG, "Storing firmware metadata in NVS...");
-    firmware_metadata_t metadata;
-    memset(&metadata, 0, sizeof(metadata));
-
-    // Extract filename from path
-    const char* filename = firmware->file_path;
-    const char* last_slash = strrchr(firmware->file_path, '/');
-    if (last_slash) {
-        filename = last_slash + 1;
-    }
-
-    // Safely copy filename with explicit truncation check
-    size_t filename_len = strlen(filename);
-    if (filename_len >= sizeof(metadata.filename)) {
-        ESP_LOGW(TAG, "Filename truncated for metadata: %s (len=%zu)", filename, filename_len);
-        filename_len = sizeof(metadata.filename) - 1;
-    }
-    memcpy(metadata.filename, filename, filename_len);
-    metadata.filename[filename_len] = '\0';
-
-    // Safely copy partition name with explicit truncation check
-    size_t partition_len = strlen(ota_partition->label);
-    if (partition_len >= sizeof(metadata.partition)) {
-        ESP_LOGW(TAG, "Partition name truncated: %s (len=%zu)", ota_partition->label, partition_len);
-        partition_len = sizeof(metadata.partition) - 1;
-    }
-    memcpy(metadata.partition, ota_partition->label, partition_len);
-    metadata.partition[partition_len] = '\0';
-
-    // Store offset and size
-    metadata.offset = ota_partition->address;
-    metadata.size = firmware->size;
-
-    // Calculate CRC32
-    ret = firmware_calculate_crc32(firmware->file_path, &metadata.crc32);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to calculate CRC32 for metadata");
-        metadata.crc32 = 0;
-    }
-
-    // Mark as valid (passed verification if enabled)
-    metadata.is_valid = true;
-
-    // Store metadata at firmware_index
-    ret = firmware_metadata_set(firmware_index, &metadata);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to store firmware metadata: %s", esp_err_to_name(ret));
-        // Continue anyway - metadata storage is not critical
-    } else {
-        // Update firmware count
-        ret = firmware_metadata_set_count(firmware_index + 1);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to update firmware count: %s", esp_err_to_name(ret));
-        }
-    }
+    // Note: Firmware metadata will be stored later for ALL firmwares at once
+    // by calling firmware_selector_store_firmware_config() after all flashing completes
 
     return ESP_OK;
 }
@@ -1354,18 +1375,16 @@ esp_err_t firmware_flasher_create_ota_table_from_layout(const firmware_selector_
     memcpy(md5_entry, md5_pattern, sizeof(md5_pattern));
 
     // Calculate and write the MD5 hash of all partition entries (excluding MD5 entry itself)
-    // Using mbedtls for MD5 calculation
-    mbedtls_md5_context md5_ctx;
-    mbedtls_md5_init(&md5_ctx);
-    mbedtls_md5_starts(&md5_ctx);
+    // Using ESP-ROM MD5 for calculation
+    md5_context_t md5_ctx;
+    esp_rom_md5_init(&md5_ctx);
 
     // Hash all partition entries before the MD5 entry
-    mbedtls_md5_update(&md5_ctx, (const unsigned char*)partitions,
+    esp_rom_md5_update(&md5_ctx, (const unsigned char*)partitions,
                       partition_count * sizeof(esp_partition_info_t));
 
     unsigned char md5_hash[16];
-    mbedtls_md5_finish(&md5_ctx, md5_hash);
-    mbedtls_md5_free(&md5_ctx);
+    esp_rom_md5_final(md5_hash, &md5_ctx);
 
     ESP_LOGI(TAG, "MD5 entry added, calculated MD5=%02x%02x%02x%02x...",
              md5_hash[0], md5_hash[1], md5_hash[2], md5_hash[3]);
