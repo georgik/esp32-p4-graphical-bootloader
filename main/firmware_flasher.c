@@ -1078,14 +1078,22 @@ static void notify_progress(uint32_t current_firmware, uint32_t current_progress
 
 static void notify_status(flash_state_t state, flash_result_t result, const char* message)
 {
-    // NOTE: Status callback removed to prevent LVGL calls from flash_task
-    // The callback was creating/showing modal dialogs with direct LVGL calls,
-    // which caused watchdog timeouts. Modal creation should be done via queue.
-    // For now, we just update the internal state without showing the modal.
-
     // Update internal state
     g_flash_state = state;
     g_flash_result = result;
+
+    // Send completion message through UI update queue when flashing finishes
+    if (state == FLASH_STATE_COMPLETED || state == FLASH_STATE_ERROR) {
+        ui_update_message_t msg = {
+            .type = UI_UPDATE_FLASH_COMPLETE,
+            .data.flash_complete = {
+                .result = result,
+                .success = (result == FLASH_RESULT_SUCCESS)
+            }
+        };
+        ui_update_send(&msg);
+        ESP_LOGI(TAG, "Flash completion notification sent via queue");
+    }
 }
 
 uint32_t firmware_flasher_calculate_chunk_size(uint32_t file_size, bool is_ota_partition)

@@ -33,6 +33,7 @@ typedef enum {
     UI_UPDATE_SHOW_MODAL,         // Show modal dialog
     UI_UPDATE_HIDE_MODAL,         // Hide modal dialog
     UI_UPDATE_REFRESH_SCREEN,     // Refresh main screen
+    UI_UPDATE_FLASH_COMPLETE,     // Flash operation completed - re-enable button, hide progress
 } ui_update_type_t;
 
 // UI update message structure
@@ -54,6 +55,10 @@ typedef struct {
         struct {
             uint32_t delay_ms;           // Delay before refresh
         } refresh;
+        struct {
+            int result;                 // Flash result code
+            bool success;                // True if successful
+        } flash_complete;
     } data;
 } ui_update_message_t;
 

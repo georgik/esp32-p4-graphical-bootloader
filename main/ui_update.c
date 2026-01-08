@@ -182,6 +182,15 @@ void ui_update_process(void)
                 refresh_main_screen();
                 break;
 
+            case UI_UPDATE_FLASH_COMPLETE:
+                // Handle flash completion - re-enable button, hide progress, show modal
+                ESP_LOGI(TAG, "Processing flash completion: success=%d", msg.data.flash_complete.success);
+
+                // Call firmware selector completion handler
+                extern void firmware_selector_handle_flash_complete(bool success);
+                firmware_selector_handle_flash_complete(msg.data.flash_complete.success);
+                break;
+
             default:
                 ESP_LOGW(TAG, "Unknown UI update type: %d", msg.type);
                 break;

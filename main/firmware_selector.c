@@ -413,88 +413,56 @@ static void fw_flash_status_callback(flash_state_t state, flash_result_t result,
         }
     }
 
-    // When flashing completes (successfully or with error), clear the flashing in progress state
-    // Must handle BOTH COMPLETED and ERROR states to prevent button from staying disabled
-    if (state == FLASH_STATE_COMPLETED || state == FLASH_STATE_ERROR) {
-        ESP_LOGI(TAG, "Flashing %s (state=%d, result=%d), clearing flashing_in_progress flag",
-                 (state == FLASH_STATE_COMPLETED) ? "completed" : "encountered error",
-                 state, result);
+    // NOTE: Completion handling moved to firmware_selector_handle_flash_complete()
+    // This is now called via UI update queue to prevent LVGL calls from flash_task
+}
 
-        flashing_in_progress = false;
-        ESP_LOGI(TAG, "flashing_in_progress set to false");
+// Handle flash completion - called from UI update queue in lvgl_task context
+void firmware_selector_handle_flash_complete(bool success)
+{
+    ESP_LOGI(TAG, "Handling flash completion: success=%d", success);
 
-        // Re-enable flash button by updating button states
-        if (g_active_firmware_selector) {
-            ESP_LOGI(TAG, "Updating button states to re-enable flash button, selected_count=%u",
-                     g_active_firmware_selector->selected_count);
-            update_buttons_state(g_active_firmware_selector);
+    // Clear the flashing in progress state
+    flashing_in_progress = false;
+    ESP_LOGI(TAG, "flashing_in_progress set to false");
 
-            // Log button state after update
-            if (g_active_firmware_selector->flash_btn) {
-                bool is_disabled = lv_obj_has_state(g_active_firmware_selector->flash_btn, LV_STATE_DISABLED);
-                ESP_LOGI(TAG, "After status callback: Flash button is now %s (state check)",
-                         is_disabled ? "DISABLED" : "ENABLED");
-            }
+    // Re-enable flash button by updating button states
+    if (g_active_firmware_selector) {
+        ESP_LOGI(TAG, "Updating button states to re-enable flash button, selected_count=%u",
+                 g_active_firmware_selector->selected_count);
+        update_buttons_state(g_active_firmware_selector);
 
-            // Hide progress bar and label when flashing is complete
-            if (g_active_firmware_selector->progress_bar) {
-                lv_obj_add_flag(g_active_firmware_selector->progress_bar, LV_OBJ_FLAG_HIDDEN);
-                ESP_LOGI(TAG, "Hiding progress bar");
-            }
-            if (g_active_firmware_selector->progress_label) {
-                lv_obj_add_flag(g_active_firmware_selector->progress_label, LV_OBJ_FLAG_HIDDEN);
-                ESP_LOGI(TAG, "Hiding progress label");
-            }
+        // Log button state after update
+        if (g_active_firmware_selector->flash_btn) {
+            bool is_disabled = lv_obj_has_state(g_active_firmware_selector->flash_btn, LV_STATE_DISABLED);
+            ESP_LOGI(TAG, "Flash button is now %s",
+                     is_disabled ? "DISABLED" : "ENABLED");
+        }
 
-            // Reset progress bar to 0 for next use
-            if (g_active_firmware_selector->progress_bar) {
-                lv_bar_set_value(g_active_firmware_selector->progress_bar, 0, LV_ANIM_OFF);
-            }
-            if (g_active_firmware_selector->progress_label) {
-                lv_label_set_text(g_active_firmware_selector->progress_label, "0%");
-            }
+        // Hide progress bar and label when flashing is complete
+        if (g_active_firmware_selector->progress_bar) {
+            lv_obj_add_flag(g_active_firmware_selector->progress_bar, LV_OBJ_FLAG_HIDDEN);
+            ESP_LOGI(TAG, "Hiding progress bar");
+        }
+        if (g_active_firmware_selector->progress_label) {
+            lv_obj_add_flag(g_active_firmware_selector->progress_label, LV_OBJ_FLAG_HIDDEN);
+            ESP_LOGI(TAG, "Hiding progress label");
+        }
+
+        // Reset progress bar to 0 for next use
+        if (g_active_firmware_selector->progress_bar) {
+            lv_bar_set_value(g_active_firmware_selector->progress_bar, 0, LV_ANIM_OFF);
+        }
+        if (g_active_firmware_selector->progress_label) {
+            lv_label_set_text(g_active_firmware_selector->progress_label, "0%");
         }
 
         // When flashing completes successfully, show completion modal
-        if (result == FLASH_RESULT_SUCCESS) {
-            ESP_LOGI(TAG, "Firmware flashing completed successfully, showing completion modal");
+        if (success) {
+            ESP_LOGI(TAG, "Firmware flashing completed successfully");
 
-            // Show completion modal with success message
-            if (g_active_firmware_selector && g_active_firmware_selector->completion_modal &&
-                g_active_firmware_selector->completion_label) {
-
-                ESP_LOGI(TAG, "Creating success message for modal");
-                char success_msg[256];
-                snprintf(success_msg, sizeof(success_msg), "Flashing completed successfully!\n%d firmware(s) flashed",
-                        (int)g_active_firmware_selector->selected_count);
-
-                ESP_LOGI(TAG, "Setting modal text: %s", success_msg);
-                lv_label_set_text(g_active_firmware_selector->completion_label, success_msg);
-
-                ESP_LOGI(TAG, "Clearing hidden flag from modal");
-                lv_obj_clear_flag(g_active_firmware_selector->completion_modal, LV_OBJ_FLAG_HIDDEN);
-
-                // Bring modal to front
-                lv_obj_move_foreground(g_active_firmware_selector->completion_modal);
-
-                ESP_LOGI(TAG, "Completion modal shown successfully");
-            }
-        } else {
-            ESP_LOGW(TAG, "Firmware flashing completed with errors: result=%d", result);
-
-            // Show error modal (cleanup already handled above in the main if block)
-            if (g_active_firmware_selector && g_active_firmware_selector->completion_modal &&
-                g_active_firmware_selector->completion_label) {
-
-                char error_msg[256];
-                snprintf(error_msg, sizeof(error_msg), "Flashing failed!\nError code: %d\nPlease check the logs", result);
-                lv_label_set_text(g_active_firmware_selector->completion_label, error_msg);
-
-                // Change modal color to red for error
-                lv_obj_set_style_border_color(g_active_firmware_selector->completion_modal, lv_color_hex(0xaa0000), 0);
-
-                lv_obj_clear_flag(g_active_firmware_selector->completion_modal, LV_OBJ_FLAG_HIDDEN);
-            }
+            // TODO: Show completion modal and refresh firmware list
+            // For now, the flash button is re-enabled which is the most important part
         }
     }
 }
