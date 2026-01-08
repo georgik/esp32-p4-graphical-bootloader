@@ -76,6 +76,11 @@ static void lvgl_task(void *arg)
     uint32_t stuck_counter = 0;
     const uint32_t STUCK_THRESHOLD = 3;  // 3 consecutive slow cycles = ~300ms
 
+    // Statistics for LVGL performance monitoring
+    uint32_t slow_cycles = 0;      // Cycles taking >100ms
+    uint32_t total_cycles = 0;     // Total cycles executed
+    uint32_t max_duration = 0;     // Maximum duration observed
+
     while (1) {
         uint32_t start_time = xTaskGetTickCount();
 
@@ -92,18 +97,45 @@ static void lvgl_task(void *arg)
         // Calculate duration
         uint32_t duration = (xTaskGetTickCount() - start_time) * portTICK_PERIOD_MS;
 
+        // Track statistics
+        total_cycles++;
+        if (duration > max_duration) {
+            max_duration = duration;
+        }
+
         // Detect if we're stuck in LVGL operations
         if (duration > 100) {  // More than 100ms is suspicious
+            slow_cycles++;
             stuck_counter++;
-            ESP_LOGW(TAG, "LVGL operation took %ums (stuck count: %u)", duration, stuck_counter);
+            ESP_LOGW(TAG, "LVGL operation took %ums (stuck count: %u, slow cycles: %u/%u, max: %u)",
+                     duration, stuck_counter, slow_cycles, total_cycles, max_duration);
 
             if (stuck_counter >= STUCK_THRESHOLD) {
                 ESP_LOGE(TAG, "LVGL task appears stuck - forcing yield to prevent watchdog");
+
+                // Print queue statistics to understand what's happening
+                extern uint32_t stat_total_sent, stat_total_dropped, stat_total_processed;
+                extern UBaseType_t stat_max_depth;
+                extern uint32_t stat_queue_full_dropped, stat_depth_limit_skipped;
+                extern UBaseType_t ui_update_get_depth(void);
+                UBaseType_t current_depth = ui_update_get_depth();
+
+                ESP_LOGE(TAG, "Queue stats at stuck - sent: %u, dropped: %u (full: %u, skip: %u), processed: %u, max_depth: %u, current: %u",
+                         stat_total_sent, stat_total_dropped, stat_queue_full_dropped,
+                         stat_depth_limit_skipped, stat_total_processed, stat_max_depth, current_depth);
+
                 stuck_counter = 0;
                 vTaskDelay(pdMS_TO_TICKS(100));  // Force longer delay to recover
             }
         } else {
             stuck_counter = 0;  // Reset counter if we're running normally
+        }
+
+        // Log performance summary every 1000 cycles (~8 seconds)
+        if (total_cycles % 1000 == 0) {
+            ESP_LOGI(TAG, "LVGL perf - cycles: %u, slow: %u (%.1f%%), max_duration: %ums",
+                     total_cycles, slow_cycles,
+                     (slow_cycles * 100.0f) / total_cycles, max_duration);
         }
 
         // VDMA PROTECTION: Allow display refresh to complete before yielding

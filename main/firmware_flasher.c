@@ -1034,8 +1034,12 @@ static void update_statistics(void)
 
 static void notify_progress(uint32_t current_firmware, uint32_t current_progress, const char* message)
 {
-    ESP_LOGD(TAG, "notify_progress called: firmware=%d, progress=%d, total_firmwares=%d",
-             current_firmware, current_progress, g_flash_stats.total_firmwares);
+    // TEMPORARY: Log every call to identify who's spamming
+    static uint32_t call_count = 0;
+    if (++call_count % 100 == 0) {
+        ESP_LOGW(TAG, "notify_progress called %u times: firmware=%d, progress=%d",
+                 call_count, current_firmware, current_progress);
+    }
 
     // Send UI update via queue (non-blocking, thread-safe)
     // This replaces the callback mechanism - LVGL updates are now handled by lvgl_task
@@ -1047,6 +1051,25 @@ static void notify_progress(uint32_t current_firmware, uint32_t current_progress
             .operation = message
         }
     };
+
+    // Check if queue is nearly full before sending
+    extern UBaseType_t ui_update_get_depth(void);
+    UBaseType_t depth = ui_update_get_depth();
+
+    if (depth > 18) {  // 90% full
+        // Track skipped updates for statistics
+        extern uint32_t stat_depth_limit_skipped;
+        stat_depth_limit_skipped++;
+
+        // Only log occasionally to avoid spam
+        static uint32_t skip_count = 0;
+        if (++skip_count % 50 == 0) {
+            ESP_LOGW(TAG, "Skipping UI update (queue depth=%u, skip_count=%u) to prevent overflow",
+                     depth, skip_count);
+        }
+        return;
+    }
+
     ui_update_send(&msg);
 
     // NOTE: Callback mechanism removed to prevent LVGL calls from flash_task

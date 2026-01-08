@@ -11,7 +11,16 @@
 #define UI_UPDATE_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include "esp_err.h"
+
+// Get UBaseType_t definition from FreeRTOS
+#ifdef __SIMULATOR_BUILD__
+    #include "freertos_mock.h"
+#else
+    #include "freertos/FreeRTOS.h"
+    #include "freertos/projdefs.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -78,6 +87,37 @@ esp_err_t ui_update_send(ui_update_message_t* msg);
  * for efficiency.
  */
 void ui_update_process(void);
+
+/**
+ * @brief Get current queue depth
+ *
+ * Returns the current number of messages in the UI update queue.
+ * Useful for monitoring queue usage and preventing overflow.
+ *
+ * @return Number of messages currently in queue
+ */
+UBaseType_t ui_update_get_depth(void);
+
+/**
+ * @brief Get queue statistics
+ *
+ * Returns statistics about queue operations for debugging.
+ *
+ * @param[out] total_sent Total messages sent
+ * @param[out] total_dropped Total messages dropped (queue full or skipped)
+ * @param[out] total_processed Total messages processed
+ * @param[out] max_depth Maximum queue depth observed
+ * @return ESP_OK on success
+ */
+esp_err_t ui_update_get_stats(uint32_t* total_sent, uint32_t* total_dropped,
+                               uint32_t* total_processed, UBaseType_t* max_depth);
+
+/**
+ * @brief Reset queue statistics
+ *
+ * Resets all statistics counters to zero. Useful for tracking individual operations.
+ */
+void ui_update_reset_stats(void);
 
 /**
  * @brief Deinitialize UI update system
