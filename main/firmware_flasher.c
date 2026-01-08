@@ -9,6 +9,7 @@
 #include "firmware_selector.h"
 #include "firmware_storage.h"
 #include "firmware_storage_config.h"
+#include "ui_update.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_flash.h"
@@ -1033,24 +1034,31 @@ static void update_statistics(void)
 
 static void notify_progress(uint32_t current_firmware, uint32_t current_progress, const char* message)
 {
-    ESP_LOGD(TAG, "notify_progress called: firmware=%d, progress=%d, total_firmwares=%d, callback=%p",
-             current_firmware, current_progress, g_flash_stats.total_firmwares,
-             g_flash_config.progress_callback);
+    ESP_LOGD(TAG, "notify_progress called: firmware=%d, progress=%d, total_firmwares=%d",
+             current_firmware, current_progress, g_flash_stats.total_firmwares);
 
-    if (g_flash_config.progress_callback) {
-        ESP_LOGD(TAG, "Calling progress callback");
-        g_flash_config.progress_callback(current_firmware, g_flash_stats.total_firmwares,
-                                        current_progress, 100, message);
-    } else {
-        ESP_LOGW(TAG, "No progress callback configured!");
-    }
+    // Send UI update via queue (non-blocking, thread-safe)
+    // This replaces the callback mechanism - LVGL updates are now handled by lvgl_task
+    ui_update_message_t msg = {
+        .type = UI_UPDATE_PROGRESS,
+        .data.progress = {
+            .firmware_index = current_firmware,
+            .percentage = (uint8_t)current_progress,
+            .operation = message
+        }
+    };
+    ui_update_send(&msg);
+
+    // NOTE: Callback mechanism removed to prevent LVGL calls from flash_task
+    // All UI updates now go through the queue and are processed by lvgl_task only
 }
 
 static void notify_status(flash_state_t state, flash_result_t result, const char* message)
 {
-    if (g_flash_config.status_callback) {
-        g_flash_config.status_callback(state, result, message);
-    }
+    // NOTE: Status callback removed to prevent LVGL calls from flash_task
+    // The callback was creating/showing modal dialogs with direct LVGL calls,
+    // which caused watchdog timeouts. Modal creation should be done via queue.
+    // For now, we just update the internal state without showing the modal.
 
     // Update internal state
     g_flash_state = state;

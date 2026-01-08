@@ -19,6 +19,7 @@
 #include "lvgl_bootloader.h"
 #include "sd_ota.h"
 #include "vdma_protection.h"
+#include "ui_update.h"
 
 static const char *TAG = "main";
 
@@ -72,12 +73,38 @@ static void lvgl_task(void *arg)
 {
     ESP_LOGI(TAG, "LVGL task started on core %d with priority %d", xPortGetCoreID(), uxTaskPriorityGet(NULL));
 
+    uint32_t stuck_counter = 0;
+    const uint32_t STUCK_THRESHOLD = 3;  // 3 consecutive slow cycles = ~300ms
+
     while (1) {
+        uint32_t start_time = xTaskGetTickCount();
+
+        // Process pending UI updates FIRST (before LVGL handler)
+        // This ensures we drain the queue and batch updates
+        ui_update_process();
+
         // VDMA PROTECTION: Enable display protection during LVGL rendering
         vdma_enable_display_protection();
 
         // CRITICAL: Give LVGL highest priority for display stability
         lv_timer_handler();
+
+        // Calculate duration
+        uint32_t duration = (xTaskGetTickCount() - start_time) * portTICK_PERIOD_MS;
+
+        // Detect if we're stuck in LVGL operations
+        if (duration > 100) {  // More than 100ms is suspicious
+            stuck_counter++;
+            ESP_LOGW(TAG, "LVGL operation took %ums (stuck count: %u)", duration, stuck_counter);
+
+            if (stuck_counter >= STUCK_THRESHOLD) {
+                ESP_LOGE(TAG, "LVGL task appears stuck - forcing yield to prevent watchdog");
+                stuck_counter = 0;
+                vTaskDelay(pdMS_TO_TICKS(100));  // Force longer delay to recover
+            }
+        } else {
+            stuck_counter = 0;  // Reset counter if we're running normally
+        }
 
         // VDMA PROTECTION: Allow display refresh to complete before yielding
         vTaskDelay(pdMS_TO_TICKS(5));  // Shorter delay for more responsive VDMA coordination
@@ -131,9 +158,18 @@ static void ota_status_callback(const char *status)
 static esp_err_t initialize_system(void)
 {
     ESP_LOGI(TAG, "Initializing ESP32-P4 LVGL bootloader...");
+    esp_err_t ret;
+
+    // Initialize UI update queue FIRST (before any LVGL operations)
+    ret = ui_update_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize UI update system: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(TAG, "UI update queue initialized");
 
     // Initialize BSP (includes LVGL initialization)
-    esp_err_t ret = board_init_display();
+    ret = board_init_display();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize display: %s", esp_err_to_name(ret));
         return ret;

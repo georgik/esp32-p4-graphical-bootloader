@@ -10,6 +10,7 @@
 #include "firmware_validator.h"
 #include "board_init.h"
 #include "firmware_storage.h"
+#include "ui_update.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_ota_ops.h"
@@ -42,7 +43,7 @@ static SemaphoreHandle_t lvgl_mutex = NULL;
 static lv_obj_t *main_screen = NULL;
 static lv_obj_t *title_label = NULL;
 static lv_obj_t *demo_btns[4] = {0};
-static lv_obj_t *status_label = NULL;
+lv_obj_t *status_label = NULL;  // Non-static for ui_update.c access
 static lv_obj_t *progress_bar = NULL;
 static lv_obj_t *progress_label = NULL;
 static lv_obj_t *app_cont = NULL;
@@ -82,7 +83,7 @@ static void init_display_mutex(void)
 }
 
 // Lock display for thread safety
-static void lock_display(void)
+void lock_display(void)
 {
     if (lvgl_mutex) {
         xSemaphoreTake(lvgl_mutex, portMAX_DELAY);
@@ -90,7 +91,7 @@ static void lock_display(void)
 }
 
 // Unlock display
-static void unlock_display(void)
+void unlock_display(void)
 {
     if (lvgl_mutex) {
         xSemaphoreGive(lvgl_mutex);
@@ -580,8 +581,9 @@ void refresh_main_screen(void)
 
     ESP_LOGI(TAG, "Main screen set as current screen");
 
-    // Force LVGL to refresh the display and handle any pending events
-    lv_timer_handler();
+    // NOTE: Don't call lv_timer_handler() here!
+    // The lvgl_task is running separately and will process this update
+    // Calling lv_timer_handler() from other tasks causes watchdog timeouts
     lv_tick_inc(lv_tick_get());
 
     // Small delay to ensure LVGL has time to process the screen changes
@@ -613,22 +615,24 @@ void update_progress_bar(uint8_t percent)
         create_progress_bar();
     }
 
+    lock_display();
     lv_bar_set_value(progress_bar, percent, LV_ANIM_OFF);
 
     char progress_text[16];
     snprintf(progress_text, sizeof(progress_text), "%d%%", percent);
     lv_label_set_text(progress_label, progress_text);
-
-    // Update LVGL display
-    lock_display();
-    lv_timer_handler();
     unlock_display();
+
+    // NOTE: Don't call lv_timer_handler() here!
+    // The lvgl_task is running separately and will process this update
+    // Calling lv_timer_handler() from other tasks causes watchdog timeouts
 
     ESP_LOGD(TAG, "Progress updated: %d%%", percent);
 }
 
 void show_progress(bool show)
 {
+    lock_display();
     if (show) {
         if (!progress_bar) {
             create_progress_bar();
@@ -643,25 +647,30 @@ void show_progress(bool show)
             lv_obj_add_flag(progress_label, LV_OBJ_FLAG_HIDDEN);
         }
     }
-
-    // Force LVGL update
-    lock_display();
-    lv_timer_handler();
     unlock_display();
+
+    // NOTE: Don't call lv_timer_handler() here!
+    // The lvgl_task is running separately and will process this update
+    // Calling lv_timer_handler() from other tasks causes watchdog timeouts
 }
 
+// Public API: Send status update through queue (safe to call from any task)
 void update_status(const char* status)
 {
     if (!status_label) return;
 
-    lv_label_set_text(status_label, status);
+    // CRITICAL: Don't call LVGL functions directly from other tasks!
+    // Even with mutex, LVGL invalidations can cause watchdog timeouts
+    // Always route through UI update queue
+    ui_update_message_t msg = {
+        .type = UI_UPDATE_STATUS,
+        .data.status = {
+            .message = status
+        }
+    };
+    ui_update_send(&msg);
 
-    // Force LVGL update
-    lock_display();
-    lv_timer_handler();
-    unlock_display();
-
-    ESP_LOGI(TAG, "Status updated: %s", status);
+    ESP_LOGI(TAG, "Status update queued: %s", status);
 }
 
 void set_ota_in_progress(bool in_progress)
@@ -672,26 +681,29 @@ void set_ota_in_progress(bool in_progress)
         show_progress(true);
         update_status("SD Card OTA in progress...");
         // Disable buttons during OTA
+        lock_display();
         for (int i = 0; i < 4; i++) {
             if (demo_btns[i]) {
                 lv_obj_add_state(demo_btns[i], LV_STATE_DISABLED);
             }
         }
+        unlock_display();
     } else {
         show_progress(false);
         update_status("OTA completed. Select another demo or restart.");
         // Re-enable buttons after OTA
+        lock_display();
         for (int i = 0; i < 4; i++) {
             if (demo_btns[i]) {
                 lv_obj_clear_state(demo_btns[i], LV_STATE_DISABLED);
             }
         }
+        unlock_display();
     }
 
-    // Force LVGL update
-    lock_display();
-    lv_timer_handler();
-    unlock_display();
+    // NOTE: Don't call lv_timer_handler() here!
+    // The lvgl_task is running separately and will process this update
+    // Calling lv_timer_handler() from other tasks causes watchdog timeouts
 }
 
 bool is_ota_in_progress(void)

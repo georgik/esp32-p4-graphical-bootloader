@@ -86,6 +86,7 @@ set(BOOTLOADER_SOURCES
     ../main/firmware_flasher.c  # Now using real firmware flasher with flash emulator
     ../main/partition_visualizer.c  # Partition table visualizer
     ../main/firmware_metadata.c  # Firmware metadata persistence
+    ../main/ui_update.c  # UI update queue for thread-safe LVGL operations
 )
 
 # Collect all LVGL source files

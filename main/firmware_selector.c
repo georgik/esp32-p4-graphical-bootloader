@@ -499,7 +499,33 @@ static void fw_flash_status_callback(flash_state_t state, flash_result_t result,
     }
 }
 
-// LVGL progress callback for firmware flashing
+// Update firmware selector progress bar (called from lvgl_task only via ui_update)
+void firmware_selector_update_progress_bar(uint8_t percentage)
+{
+    extern firmware_selector_t* g_active_firmware_selector;
+    extern void lock_display(void);
+    extern void unlock_display(void);
+
+    if (g_active_firmware_selector && g_active_firmware_selector->progress_bar && g_active_firmware_selector->progress_label) {
+        lock_display();
+
+        // Show progress elements (they might be hidden from initial state)
+        lv_obj_clear_flag(g_active_firmware_selector->progress_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_active_firmware_selector->progress_label, LV_OBJ_FLAG_HIDDEN);
+
+        // Update progress bar
+        lv_bar_set_value(g_active_firmware_selector->progress_bar, percentage, LV_ANIM_OFF);
+
+        // Update percentage label
+        char progress_text[16];
+        snprintf(progress_text, sizeof(progress_text), "%d%%", percentage);
+        lv_label_set_text(g_active_firmware_selector->progress_label, progress_text);
+
+        unlock_display();
+    }
+}
+
+// LVGL progress callback for firmware flashing (NO LONGER USED - replaced by queue mechanism)
 static void fw_flash_progress_callback(uint32_t current_firmware, uint32_t total_firmwares,
                                    uint32_t current_progress, uint32_t total_progress, const char* status_message)
 {
