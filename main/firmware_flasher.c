@@ -10,6 +10,7 @@
 #include "firmware_storage.h"
 #include "firmware_storage_config.h"
 #include "ui_update.h"
+#include "lvgl_bootloader.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_flash.h"
@@ -109,9 +110,16 @@ esp_err_t firmware_flasher_start(const flash_config_t* config)
     g_flash_config = *config;
     g_flash_config.firmware_selector = config->firmware_selector; // Ensure pointer is valid
 
-    // Create flash task with minimal parameters
-    BaseType_t ret = xTaskCreate(flash_task, "flash_task", 12288, g_flash_config.firmware_selector,
-                                  configMAX_PRIORITIES - 3, &g_flash_task_handle);
+    // Create flash task on Core 0 (separate from LVGL on Core 1)
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        flash_task,
+        "flash_task",
+        12288,
+        g_flash_config.firmware_selector,
+        configMAX_PRIORITIES - 3,
+        &g_flash_task_handle,
+        0  // Core 0 for flash operations (LVGL is on Core 1)
+    );
 
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create flash task");
@@ -577,8 +585,10 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
         int64_t chunk_start = esp_timer_get_time();
         ESP_LOGV(TAG, "Erasing chunk at 0x%x size=%u", ota_partition->address + bytes_erased, chunk_size);
 
-        // Erase this chunk (4KB sector - typically 100-200ms)
-        ret = esp_flash_erase_region(NULL, ota_partition->address + bytes_erased, chunk_size);
+        // Erase this chunk using partition API (handles cache/sync properly)
+        // esp_partition_erase_range is the proper API that handles cache invalidation
+        // and core synchronization, preventing crashes when code runs from flash
+        ret = esp_partition_erase_range(ota_partition, bytes_erased, chunk_size);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to erase OTA partition chunk at offset 0x%x: %s",
                      bytes_erased, esp_err_to_name(ret));
@@ -601,11 +611,15 @@ static esp_err_t flash_single_firmware_to_partition(const firmware_info_t* firmw
 
             // Update UI: send operation name as status message, progress bar shows percentage
             notify_progress(firmware_index + 1, erase_progress, "Erasing");
-        }
 
-        // CRITICAL: Yield after EVERY 4KB erase chunk
-        // Flash erase is very slow (100-200ms per sector), so we must yield frequently
-        vTaskDelay(pdMS_TO_TICKS(10));
+            // CRITICAL: After sending UI update, give LVGL time to process it BEFORE next erase
+            // LVGL on Core 1 needs time to handle the event while Core 0 is idle
+            // This prevents allocator corruption when the next erase causes bus stalls
+            vTaskDelay(pdMS_TO_TICKS(100));  // 100ms for LVGL to fully process update
+        } else {
+            // Small delay between chunks to prevent watchdog timeout
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
     }
 
     int64_t total_erase_time = (esp_timer_get_time() - erase_start_time) / 1000;

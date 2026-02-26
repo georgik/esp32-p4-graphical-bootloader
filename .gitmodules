@@ -1,0 +1,3 @@
+[submodule "simulator/lvgl"]
+	path = simulator/lvgl
+	url = https://github.com/lvgl/lvgl.git
