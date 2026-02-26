@@ -39,13 +39,13 @@ void vdma_enable_display_protection(void)
 {
     display_protect_mode = true;
     display_refresh_timestamp = xTaskGetTickCount();
-    ESP_LOGD(TAG, "VDMA display protection enabled - blocking intensive operations");
+    ESP_LOGV(TAG, "VDMA display protection enabled - blocking intensive operations");
 }
 
 void vdma_disable_display_protection(void)
 {
     display_protect_mode = false;
-    ESP_LOGD(TAG, "VDMA display protection disabled - allowing intensive operations");
+    ESP_LOGV(TAG, "VDMA display protection disabled - allowing intensive operations");
 }
 
 bool vdma_is_display_protected(void)
@@ -61,7 +61,7 @@ void vdma_ensure_display_refresh(uint32_t min_interval_ms)
     if (elapsed < pdMS_TO_TICKS(min_interval_ms)) {
         // Display hasn't refreshed recently, wait for it
         TickType_t wait_time = pdMS_TO_TICKS(min_interval_ms) - elapsed;
-        ESP_LOGD(TAG, "VDMA waiting %d ms for display refresh", wait_time);
+        ESP_LOGV(TAG, "VDMA waiting %d ms for display refresh", wait_time);
         vTaskDelay(wait_time);
     }
 
