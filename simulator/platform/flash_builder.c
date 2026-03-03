@@ -155,6 +155,8 @@ static esp_err_t generate_partition_table(
         return ESP_ERR_NO_MEM;
     }
 
+    // ESP-IDF MD5 partition table format: NO separate header
+    // Partition entries start directly at offset 0
     int entry_count = 0;
     partition_entry_t* entries = (partition_entry_t*)pt_buffer;
 
@@ -237,6 +239,29 @@ static esp_err_t generate_partition_table(
 
         current_offset += partition_size;
     }
+
+    // Add MD5 partition table entry (required by ESP-IDF)
+    // MD5 entry format (32 bytes):
+    // - bytes 0-1: 0xEBEB (MD5 magic, little-endian)
+    // - bytes 2-15: 0xFF padding (14 bytes)
+    // - bytes 16-31: MD5 hash of all partition entries (excluding MD5 entry)
+    uint8_t* md5_entry = (uint8_t*)&entries[entry_count];
+    memset(md5_entry, 0, 32);
+
+    // Set magic
+    md5_entry[0] = 0xEB;
+    md5_entry[1] = 0xEB;
+
+    // Set padding (bytes 2-15)
+    memset(md5_entry + 2, 0xFF, 14);
+
+    // Calculate MD5 of all partition entries (excluding the MD5 entry itself)
+    size_t entries_size = entry_count * sizeof(partition_entry_t);
+    md5_calculate((uint8_t*)entries, entries_size, md5_entry + 16);
+
+    entry_count++;
+
+    ESP_LOGI(TAG, "  [%d] MD5 entry (ESP-IDF compatibility, calculated checksum)", entry_count - 1);
 
     // Set output parameters (firmware_storage_offset is already fixed at 0x13C000)
     *partition_table_out = pt_buffer;
@@ -661,6 +686,7 @@ flash_builder_err_t flash_builder_create_with_firmwares(
             ESP_LOGI(TAG, "  ✓ Calculated CRC32: 0x%08X", crc);
 
             // Parse partition table to find OTA partition offset for this firmware
+            // ESP-IDF MD5 partition table format: NO header, entries start at offset 0
             partition_entry_t* pt_entries = (partition_entry_t*)partition_table_data;
             int pt_entry_count = pt_size / sizeof(partition_entry_t);
 

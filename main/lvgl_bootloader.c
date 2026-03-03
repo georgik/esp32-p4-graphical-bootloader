@@ -327,8 +327,18 @@ static void boot_firmware_cb(lv_event_t *e)
         }
 
         // Calculate the absolute address of the firmware data
-        // The entry.offset is relative to FIRMWARE_STORAGE_OFFSET
-        uint32_t firmware_address = FIRMWARE_STORAGE_OFFSET + entry.offset;
+        // The entry.offset can be either:
+        // 1. Relative to FIRMWARE_STORAGE_OFFSET (when flashed by our bootloader)
+        // 2. Absolute OTA address (when created by simulator)
+        // Detect which case by checking if offset is >= OTA_0 start (0x140000)
+        uint32_t firmware_address;
+        if (entry.offset >= 0x140000) {
+            // Already an absolute OTA address (simulator-generated image)
+            firmware_address = entry.offset;
+        } else {
+            // Relative offset (flashed by our bootloader)
+            firmware_address = FIRMWARE_STORAGE_OFFSET + entry.offset;
+        }
 
         ESP_LOGI(TAG, "Booting firmware %u: %s @ address 0x%x",
                  *firmware_index, entry.name, firmware_address);

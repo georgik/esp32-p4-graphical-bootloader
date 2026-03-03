@@ -76,10 +76,8 @@ static int print_partition_table(FILE* fp) {
     printf("Partition Table (offset 0x%x)\n", PARTITION_TABLE_OFFSET);
     printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-    // ESP-IDF uses simple partition table without separate header
-    // Each entry starts with magic 0xAA50, entries are 32 bytes each
-    // Maximum 95 entries (MD5 format is 96 entries but last is for MD5)
-
+    // ESP-IDF MD5 partition table format: NO separate header
+    // Partition entries start directly at offset 0
     printf("%-12s %-20s %-10s %-10s %-12s %-12s\n",
            "Type", "Subtype", "Offset", "Size", "End", "Name");
     printf("────────────────────────────────────────────────────────────────\n");

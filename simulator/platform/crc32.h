@@ -50,6 +50,15 @@ uint32_t crc32_update(uint32_t crc, const uint8_t* data, size_t length);
  */
 uint32_t crc32_finalize(uint32_t crc);
 
+/**
+ * @brief Calculate MD5 hash
+ *
+ * @param data Data buffer to calculate hash for
+ * @param length Length of data in bytes
+ * @param md5_output Output buffer (16 bytes) for MD5 hash
+ */
+void md5_calculate(const uint8_t* data, size_t length, uint8_t* md5_output);
+
 #ifdef __cplusplus
 }
 #endif
