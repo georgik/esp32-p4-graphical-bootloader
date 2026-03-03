@@ -562,8 +562,8 @@ flash_builder_err_t flash_builder_create_with_firmwares(
         }
 
         for (int i = 0; i < firmware_count; i++) {
-            long fw_size = flash_builder_get_file_size(firmware_paths[i]);
-            if (fw_size < 0) {
+            long fw_size_signed = flash_builder_get_file_size(firmware_paths[i]);
+            if (fw_size_signed < 0) {
                 ESP_LOGE(TAG, "Failed to get firmware size: %s", firmware_paths[i]);
                 free(firmware_sizes);
                 free(flash_image);
@@ -572,7 +572,8 @@ flash_builder_err_t flash_builder_create_with_firmwares(
                 free(factory_app_data);
                 return FLASH_BUILDER_ERR_MISSING_FILE;
             }
-            firmware_sizes[i] = (size_t)fw_size;
+            size_t fw_size = (size_t)fw_size_signed;
+            firmware_sizes[i] = fw_size;
             ESP_LOGI(TAG, "✓ Firmware %d: %s (%.2f MB)",
                      i, firmware_names[i], fw_size / (1024.0 * 1024.0));
         }
@@ -654,17 +655,20 @@ flash_builder_err_t flash_builder_create_with_firmwares(
 
         for (int i = 0; i < firmware_count; i++) {
             // Get firmware file size
-            long fw_size = flash_builder_get_file_size(firmware_paths[i]);
-            if (fw_size < 0) {
+            long fw_size_signed = flash_builder_get_file_size(firmware_paths[i]);
+            if (fw_size_signed < 0) {
                 ESP_LOGE(TAG, "Failed to get firmware size: %s", firmware_paths[i]);
                 continue;
             }
+
+            // Use size_t for all size calculations to avoid signed/unsigned issues
+            size_t fw_size = (size_t)fw_size_signed;
 
             total_firmware_size += fw_size;
 
             ESP_LOGI(TAG, "Processing firmware %d/%d: %s",
                      i + 1, firmware_count, firmware_names[i]);
-            ESP_LOGI(TAG, "  Size: %ld bytes (%.2f MB)",
+            ESP_LOGI(TAG, "  Size: %zu bytes (%.2f MB)",
                      fw_size, fw_size / (1024.0 * 1024.0));
 
             // Read firmware
@@ -675,7 +679,7 @@ flash_builder_err_t flash_builder_create_with_firmwares(
             }
 
             ssize_t bytes_read = flash_builder_read_file(firmware_paths[i], fw_buffer, fw_size);
-            if (bytes_read != fw_size) {
+            if ((size_t)bytes_read != fw_size) {
                 ESP_LOGE(TAG, "  Failed to read firmware");
                 free(fw_buffer);
                 continue;
