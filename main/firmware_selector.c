@@ -611,11 +611,11 @@ static void update_firmware_list_item(firmware_selector_t* selector, uint32_t in
         lv_obj_set_style_border_width(fw->list_item, 2, 0);
         lv_obj_set_style_text_color(label, lv_color_white(), 0);
     } else {
-        // Unselected items get lighter styling for white background
-        lv_obj_set_style_bg_color(fw->list_item, lv_color_hex(0xe0e0e0), 0); // Light gray
-        lv_obj_set_style_border_color(fw->list_item, lv_color_hex(0xcccccc), 0);
+        // Unselected items get darker styling for black background
+        lv_obj_set_style_bg_color(fw->list_item, lv_color_hex(0x2c2c2c), 0); // Dark gray
+        lv_obj_set_style_border_color(fw->list_item, lv_color_hex(0x444444), 0);
         lv_obj_set_style_border_width(fw->list_item, 1, 0);
-        lv_obj_set_style_text_color(label, lv_color_hex(0x333333), 0); // Dark text
+        lv_obj_set_style_text_color(label, lv_color_hex(0xcccccc), 0); // Light text
     }
 }
 
@@ -678,7 +678,7 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
     // Create main screen
     selector->screen = lv_obj_create(NULL);
     lv_obj_set_size(selector->screen, FW_SELECTOR_SCREEN_WIDTH, FW_SELECTOR_SCREEN_HEIGHT);
-    lv_obj_set_style_bg_color(selector->screen, lv_color_white(), 0);
+    lv_obj_set_style_bg_color(selector->screen, lv_color_black(), 0);
 
     // Create title - larger and more prominent for 1024px screen
     lv_obj_t* title = lv_label_create(selector->screen);
@@ -704,7 +704,7 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
     lv_obj_set_scrollbar_mode(selector->list, LV_SCROLLBAR_MODE_AUTO);
 
     // Style the container - CRITICAL: Disable borders to prevent macOS crash
-    lv_obj_set_style_bg_color(selector->list, lv_color_hex(0xf5f5f5), 0);
+    lv_obj_set_style_bg_color(selector->list, lv_color_hex(0x1a1a1a), 0);
     lv_obj_set_style_border_width(selector->list, 0, 0);           // CRITICAL: No borders
     lv_obj_set_style_border_opa(selector->list, LV_OPA_TRANSP, 0); // CRITICAL: Transparent
     lv_obj_set_style_pad_all(selector->list, 5, 0);
@@ -727,7 +727,7 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
         lv_obj_set_style_border_opa(btn, LV_OPA_TRANSP, 0);
 
         // Set background color
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0xffffff), 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x0D47A1), 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
 
         // Create label for firmware name
@@ -808,7 +808,7 @@ esp_err_t firmware_selector_create_ui(firmware_selector_t* selector)
     lv_obj_set_size(view_parts_btn, 120, FW_BUTTON_HEIGHT);
     lv_obj_align(view_parts_btn, LV_ALIGN_LEFT_MID, 310, 0);
     lv_obj_add_event_cb(view_parts_btn, fw_selector_view_partitions_cb, LV_EVENT_CLICKED, selector);
-    lv_obj_set_style_bg_color(view_parts_btn, lv_color_hex(0x2196F3), 0);
+    lv_obj_set_style_bg_color(view_parts_btn, lv_color_hex(0x0D47A1), 0);
     label = lv_label_create(view_parts_btn);
     lv_label_set_text(label, "View Parts");
     lv_obj_center(label);

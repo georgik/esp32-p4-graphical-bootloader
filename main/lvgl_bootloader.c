@@ -143,6 +143,7 @@ static void create_main_screen(void)
 {
     screens[SCREEN_MAIN] = lv_obj_create(NULL);
     main_screen = screens[SCREEN_MAIN];
+    lv_obj_set_style_bg_color(main_screen, lv_color_black(), 0);
 
     // Create title - position higher and use smaller font
     title_label = lv_label_create(main_screen);
@@ -157,34 +158,12 @@ static void create_main_screen(void)
     lv_obj_set_layout(app_cont, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(app_cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(app_cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_color(app_cont, lv_color_hex(0x1a1a1a), 0);  // Dark gray background
+    lv_obj_set_style_border_width(app_cont, 0, 0);  // Remove border
+    lv_obj_set_style_pad_all(app_cont, 10, 0);  // Add some padding
 
-    // Create "Load from SD Card" button FIRST - always visible regardless of firmwares
-    // This button allows switching to the SD card flashing screen
-    demo_btns[0] = lv_btn_create(main_screen);
-    lv_obj_add_style(demo_btns[0], &style_btn, 0);
-    lv_obj_add_style(demo_btns[0], &style_btn_pressed, LV_STATE_PRESSED);
-    lv_obj_set_size(demo_btns[0], 180, 50);  // Smaller button
-    lv_obj_align(demo_btns[0], LV_ALIGN_BOTTOM_RIGHT, -20, -20);
-
-    lv_obj_t *load_label = lv_label_create(demo_btns[0]);
-    lv_label_set_text(load_label, "Load from SD Card");
-    lv_obj_center(load_label);
-    lv_obj_set_style_text_font(load_label, &lv_font_montserrat_12, 0);
-
-    // Check if /sdcard/firmwares exists and enable/disable button accordingly
-    struct stat st;
-    if (stat("/sdcard/firmwares", &st) == 0 && S_ISDIR(st.st_mode)) {
-        // Directory exists - button is enabled by default
-        ESP_LOGI(TAG, "SD card firmware directory found, 'Load from SD Card' button enabled");
-    } else {
-        // Directory doesn't exist - disable button
-        ESP_LOGI(TAG, "SD card firmware directory not found, disabling 'Load from SD Card' button");
-        lv_obj_add_state(demo_btns[0], LV_STATE_DISABLED);
-    }
-
-    // Store button ID and add callback for firmware selector
-    lv_obj_set_user_data(demo_btns[0], (void*)(uintptr_t)0);
-    lv_obj_add_event_cb(demo_btns[0], demo_btn_event_cb, LV_EVENT_CLICKED, NULL);
+    // "Load from SD Card" button is now hidden - firmware flashing from SD card is disabled
+    demo_btns[0] = NULL;
 
     // Read firmware from firmware_storage partition and create boot buttons
     ESP_LOGI(TAG, "Reading firmware storage for MAIN SCREEN...");
@@ -220,13 +199,13 @@ static void create_main_screen(void)
             char size_str[32];
             firmware_format_size(entry.size, size_str, sizeof(size_str));
 
-            snprintf(btn_text, sizeof(btn_text), "%s\nSize: %s, CRC32: 0x%08" PRIX32,
-                     entry.name, size_str, entry.crc32);
+            snprintf(btn_text, sizeof(btn_text), "%s\nSize: %s",
+                     entry.name, size_str);
 
             lv_obj_t *label = lv_label_create(btn);
             lv_label_set_text(label, btn_text);
             lv_obj_center(label);
-            lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
 
             lv_obj_add_event_cb(btn, boot_firmware_cb, LV_EVENT_CLICKED, NULL);
 
@@ -251,6 +230,7 @@ static void create_main_screen(void)
 static void create_demo_screen(void)
 {
     screens[SCREEN_DEMO] = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(screens[SCREEN_DEMO], lv_color_black(), 0);
 
     // Title
     lv_obj_t *title = lv_label_create(screens[SCREEN_DEMO]);
@@ -281,6 +261,7 @@ static void create_demo_screen(void)
 static void create_settings_screen(void)
 {
     screens[SCREEN_SETTINGS] = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(screens[SCREEN_SETTINGS], lv_color_black(), 0);
 
     // Title
     lv_obj_t *title = lv_label_create(screens[SCREEN_SETTINGS]);
@@ -442,6 +423,7 @@ static void boot_firmware_cb(lv_event_t *e)
 static void create_boot_menu_screen(void)
 {
     screens[SCREEN_BOOT_MENU] = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(screens[SCREEN_BOOT_MENU], lv_color_black(), 0);
 
     // Title
     lv_obj_t *title = lv_label_create(screens[SCREEN_BOOT_MENU]);
@@ -456,6 +438,9 @@ static void create_boot_menu_screen(void)
     lv_obj_set_layout(cont, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_color(cont, lv_color_hex(0x1a1a1a), 0);  // Dark gray background
+    lv_obj_set_style_border_width(cont, 0, 0);  // Remove border
+    lv_obj_set_style_pad_all(cont, 10, 0);  // Add some padding
 
     // Read firmware from firmware_storage partition and create boot buttons
     ESP_LOGI(TAG, "Reading firmware storage for BOOT MENU SCREEN...");
@@ -491,13 +476,13 @@ static void create_boot_menu_screen(void)
             char size_str[32];
             firmware_format_size(entry.size, size_str, sizeof(size_str));
 
-            snprintf(btn_text, sizeof(btn_text), "%s\nSize: %s, CRC32: 0x%08" PRIX32,
-                     entry.name, size_str, entry.crc32);
+            snprintf(btn_text, sizeof(btn_text), "%s\nSize: %s",
+                     entry.name, size_str);
 
             lv_obj_t *label = lv_label_create(btn);
             lv_label_set_text(label, btn_text);
             lv_obj_center(label);
-            lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
 
             lv_obj_add_event_cb(btn, boot_firmware_cb, LV_EVENT_CLICKED, NULL);
 
@@ -723,31 +708,30 @@ bool is_ota_in_progress(void)
 
 static void init_styles(void)
 {
-    // Title style
+    // Title style - change to lighter green for black background
     lv_style_init(&style_title);
     lv_style_set_text_font(&style_title, &lv_font_montserrat_20);
-    lv_style_set_text_color(&style_title, lv_color_hex(0x00AA00));
+    lv_style_set_text_color(&style_title, lv_color_hex(0x00FF00));
     lv_style_set_text_align(&style_title, LV_TEXT_ALIGN_CENTER);
 
-    // Button style
+    // Button style - darker blue for less brightness
     lv_style_init(&style_btn);
-    lv_style_set_bg_color(&style_btn, lv_color_hex(0x2196F3));
-    lv_style_set_bg_color(&style_btn, lv_color_hex(0x1976D2));
-    lv_style_set_border_color(&style_btn, lv_color_hex(0x0D47A1));
+    lv_style_set_bg_color(&style_btn, lv_color_hex(0x0D47A1));  // Darker blue
+    lv_style_set_border_color(&style_btn, lv_color_hex(0x0A3278));  // Even darker border
     lv_style_set_border_width(&style_btn, 2);
     lv_style_set_radius(&style_btn, 8);
     lv_style_set_text_color(&style_btn, lv_color_white());
     lv_style_set_text_font(&style_btn, &lv_font_montserrat_14);
 
-    // Button pressed style
+    // Button pressed style - even darker when pressed
     lv_style_init(&style_btn_pressed);
-    lv_style_set_bg_color(&style_btn_pressed, lv_color_hex(0x0D47A1));
-    lv_style_set_border_color(&style_btn_pressed, lv_color_hex(0x1565C0));
+    lv_style_set_bg_color(&style_btn_pressed, lv_color_hex(0x0A3278));  // Very dark blue
+    lv_style_set_border_color(&style_btn_pressed, lv_color_hex(0x072550));
 
-    // Status style
+    // Status style - lighter text for black background
     lv_style_init(&style_status);
     lv_style_set_text_font(&style_status, &lv_font_montserrat_12);
-    lv_style_set_text_color(&style_status, lv_color_hex(0x666666));
+    lv_style_set_text_color(&style_status, lv_color_hex(0xCCCCCC));  // Light gray instead of dark gray
     lv_style_set_text_align(&style_status, LV_TEXT_ALIGN_CENTER);
 
     ESP_LOGI(TAG, "LVGL styles initialized");
