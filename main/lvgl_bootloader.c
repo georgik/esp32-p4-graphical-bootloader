@@ -187,19 +187,19 @@ static void create_main_screen(void)
             lv_obj_t *btn = lv_btn_create(app_cont);
             lv_obj_add_style(btn, &style_btn, 0);
             lv_obj_add_style(btn, &style_btn_pressed, LV_STATE_PRESSED);
-            lv_obj_set_size(btn, 800, 80);
+            lv_obj_set_size(btn, 800, 60);
 
             // Store firmware index for boot callback (offset points to firmware data)
             uint32_t *stored_index = malloc(sizeof(uint32_t));
             *stored_index = i;
             lv_obj_set_user_data(btn, stored_index);
 
-            // Create button label with firmware info
+            // Create button label with firmware info - single line with size in brackets
             char btn_text[256];
             char size_str[32];
             firmware_format_size(entry.size, size_str, sizeof(size_str));
 
-            snprintf(btn_text, sizeof(btn_text), "%s\nSize: %s",
+            snprintf(btn_text, sizeof(btn_text), "%s (%s)",
                      entry.name, size_str);
 
             lv_obj_t *label = lv_label_create(btn);
@@ -464,19 +464,19 @@ static void create_boot_menu_screen(void)
             lv_obj_t *btn = lv_btn_create(cont);
             lv_obj_add_style(btn, &style_btn, 0);
             lv_obj_add_style(btn, &style_btn_pressed, LV_STATE_PRESSED);
-            lv_obj_set_size(btn, 800, 80);
+            lv_obj_set_size(btn, 800, 60);
 
             // Store firmware index for boot callback
             uint32_t *stored_index = malloc(sizeof(uint32_t));
             *stored_index = i;
             lv_obj_set_user_data(btn, stored_index);
 
-            // Create button label with firmware info
+            // Create button label with firmware info - single line with size in brackets
             char btn_text[256];
             char size_str[32];
             firmware_format_size(entry.size, size_str, sizeof(size_str));
 
-            snprintf(btn_text, sizeof(btn_text), "%s\nSize: %s",
+            snprintf(btn_text, sizeof(btn_text), "%s (%s)",
                      entry.name, size_str);
 
             lv_obj_t *label = lv_label_create(btn);
