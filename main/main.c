@@ -19,9 +19,7 @@
 #include "lvgl_bootloader.h"
 #include "sd_ota.h"
 #include "vdma_protection.h"
-#include "nvs_flash.h"
-#include "nvs.h"
-#include "firmware_metadata.h"
+#include "ui_update.h"
 
 static const char *TAG = "main";
 
@@ -41,13 +39,13 @@ void vdma_enable_display_protection(void)
 {
     display_protect_mode = true;
     display_refresh_timestamp = xTaskGetTickCount();
-    ESP_LOGD(TAG, "VDMA display protection enabled - blocking intensive operations");
+    ESP_LOGV(TAG, "VDMA display protection enabled - blocking intensive operations");
 }
 
 void vdma_disable_display_protection(void)
 {
     display_protect_mode = false;
-    ESP_LOGD(TAG, "VDMA display protection disabled - allowing intensive operations");
+    ESP_LOGV(TAG, "VDMA display protection disabled - allowing intensive operations");
 }
 
 bool vdma_is_display_protected(void)
@@ -63,7 +61,7 @@ void vdma_ensure_display_refresh(uint32_t min_interval_ms)
     if (elapsed < pdMS_TO_TICKS(min_interval_ms)) {
         // Display hasn't refreshed recently, wait for it
         TickType_t wait_time = pdMS_TO_TICKS(min_interval_ms) - elapsed;
-        ESP_LOGD(TAG, "VDMA waiting %d ms for display refresh", wait_time);
+        ESP_LOGV(TAG, "VDMA waiting %d ms for display refresh", wait_time);
         vTaskDelay(wait_time);
     }
 
@@ -75,12 +73,70 @@ static void lvgl_task(void *arg)
 {
     ESP_LOGI(TAG, "LVGL task started on core %d with priority %d", xPortGetCoreID(), uxTaskPriorityGet(NULL));
 
+    uint32_t stuck_counter = 0;
+    const uint32_t STUCK_THRESHOLD = 3;  // 3 consecutive slow cycles = ~300ms
+
+    // Statistics for LVGL performance monitoring
+    uint32_t slow_cycles = 0;      // Cycles taking >100ms
+    uint32_t total_cycles = 0;     // Total cycles executed
+    uint32_t max_duration = 0;     // Maximum duration observed
+
     while (1) {
+        uint32_t start_time = xTaskGetTickCount();
+
+        // Process pending UI updates FIRST (before LVGL handler)
+        // This ensures we drain the queue and batch updates
+        ui_update_process();
+
         // VDMA PROTECTION: Enable display protection during LVGL rendering
         vdma_enable_display_protection();
 
         // CRITICAL: Give LVGL highest priority for display stability
         lv_timer_handler();
+
+        // Calculate duration
+        uint32_t duration = (xTaskGetTickCount() - start_time) * portTICK_PERIOD_MS;
+
+        // Track statistics
+        total_cycles++;
+        if (duration > max_duration) {
+            max_duration = duration;
+        }
+
+        // Detect if we're stuck in LVGL operations
+        if (duration > 100) {  // More than 100ms is suspicious
+            slow_cycles++;
+            stuck_counter++;
+            ESP_LOGW(TAG, "LVGL operation took %ums (stuck count: %u, slow cycles: %u/%u, max: %u)",
+                     duration, stuck_counter, slow_cycles, total_cycles, max_duration);
+
+            if (stuck_counter >= STUCK_THRESHOLD) {
+                ESP_LOGE(TAG, "LVGL task appears stuck - forcing yield to prevent watchdog");
+
+                // Print queue statistics to understand what's happening
+                extern uint32_t stat_total_sent, stat_total_dropped, stat_total_processed;
+                extern UBaseType_t stat_max_depth;
+                extern uint32_t stat_queue_full_dropped, stat_depth_limit_skipped;
+                extern UBaseType_t ui_update_get_depth(void);
+                UBaseType_t current_depth = ui_update_get_depth();
+
+                ESP_LOGE(TAG, "Queue stats at stuck - sent: %u, dropped: %u (full: %u, skip: %u), processed: %u, max_depth: %u, current: %u",
+                         stat_total_sent, stat_total_dropped, stat_queue_full_dropped,
+                         stat_depth_limit_skipped, stat_total_processed, stat_max_depth, current_depth);
+
+                stuck_counter = 0;
+                vTaskDelay(pdMS_TO_TICKS(100));  // Force longer delay to recover
+            }
+        } else {
+            stuck_counter = 0;  // Reset counter if we're running normally
+        }
+
+        // Log performance summary every 1000 cycles (~8 seconds)
+        if (total_cycles % 1000 == 0) {
+            ESP_LOGI(TAG, "LVGL perf - cycles: %u, slow: %u (%.1f%%), max_duration: %ums",
+                     total_cycles, slow_cycles,
+                     (slow_cycles * 100.0f) / total_cycles, max_duration);
+        }
 
         // VDMA PROTECTION: Allow display refresh to complete before yielding
         vTaskDelay(pdMS_TO_TICKS(5));  // Shorter delay for more responsive VDMA coordination
@@ -134,36 +190,15 @@ static void ota_status_callback(const char *status)
 static esp_err_t initialize_system(void)
 {
     ESP_LOGI(TAG, "Initializing ESP32-P4 LVGL bootloader...");
+    esp_err_t ret;
 
-    // Initialize NVS first - needed for storing firmware configuration
-    ESP_LOGI(TAG, "Initializing NVS...");
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition needs to be erased, erasing...");
-        ret = nvs_flash_erase();
-        if (ret == ESP_OK) {
-            ret = nvs_flash_init();
-        }
-    }
-
+    // Initialize UI update queue FIRST (before any LVGL operations)
+    ret = ui_update_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize NVS: %s", esp_err_to_name(ret));
-        // Continue without NVS - firmware list won't persist
-    } else {
-        ESP_LOGI(TAG, "NVS initialized successfully");
-
-        // Initialize firmware metadata module
-        ret = firmware_metadata_init();
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to initialize firmware metadata: %s", esp_err_to_name(ret));
-            // Continue anyway - metadata is optional
-        } else {
-            ESP_LOGI(TAG, "Firmware metadata initialized");
-
-            // Print existing firmware metadata on boot
-            firmware_metadata_print_all();
-        }
+        ESP_LOGE(TAG, "Failed to initialize UI update system: %s", esp_err_to_name(ret));
+        return ret;
     }
+    ESP_LOGI(TAG, "UI update queue initialized");
 
     // Initialize BSP (includes LVGL initialization)
     ret = board_init_display();
@@ -174,14 +209,8 @@ static esp_err_t initialize_system(void)
 
     ESP_LOGI(TAG, "Display initialized successfully");
 
-    // Initialize LVGL bootloader UI
-    ret = lvgl_bootloader_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize LVGL bootloader: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // Initialize SD card OTA
+    // Initialize SD card FIRST (before LVGL bootloader)
+    // The firmware selector needs /sdcard to be mounted
     ret = sd_ota_init();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "SD card OTA initialization failed: %s", esp_err_to_name(ret));
@@ -191,6 +220,13 @@ static esp_err_t initialize_system(void)
         sd_ota_set_progress_callback(ota_progress_callback);
         sd_ota_set_status_callback(ota_status_callback);
         update_status("Ready - SD card available");
+    }
+
+    // Initialize LVGL bootloader UI (after SD card is mounted)
+    ret = lvgl_bootloader_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize LVGL bootloader: %s", esp_err_to_name(ret));
+        return ret;
     }
 
     ESP_LOGI(TAG, "System initialization complete");

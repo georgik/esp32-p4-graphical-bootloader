@@ -79,41 +79,16 @@ esp_err_t board_init_display(void)
 
 esp_err_t board_init_display(void)
 {
-    ESP_LOGI(TAG, "Initializing ESP32-P4 Function EV Board with STABLE EK79007 configuration (Anti-Flicker)...");
+    ESP_LOGI(TAG, "Initializing ESP32-P4 Function EV Board with BSP defaults...");
 
-    // Create CUSTOM display configuration with STABLE settings to prevent flickering
-    bsp_display_cfg_t stable_cfg = {
-        .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
-        .buffer_size = BSP_LCD_DRAW_BUFF_SIZE,
-        .double_buffer = BSP_LCD_DRAW_BUFF_DOUBLE,
-        .hw_cfg = {
-            .hdmi_resolution = BSP_HDMI_RES_NONE,
-            .dsi_bus = {
-                .phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT,
-                .lane_bit_rate_mbps = 600,  // BALANCED: 600Mbps prevents flickering while maintaining image quality (400Mbps caused skewing)
-            }
-        },
-        .flags = {
-#if CONFIG_BSP_LCD_COLOR_FORMAT_RGB888
-            .buff_dma = false,
-#else
-            .buff_dma = true,
-#endif
-            .buff_spiram = false,  // CRITICAL: Keep framebuffer in IRAM to avoid PSRAM contention
-            .sw_rotate = true,
-        }
-    };
-
-    // Use BSP display start with STABLE configuration
-    lv_display_t* display = bsp_display_start_with_config(&stable_cfg);
+    // Use BSP display start with DEFAULT configuration (same as display example)
+    lv_display_t* display = bsp_display_start();
     if (!display) {
-        ESP_LOGE(TAG, "Failed to start BSP display with stable configuration");
+        ESP_LOGE(TAG, "Failed to start BSP display");
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "BSP display started successfully with ANTI-FLICKERING configuration:");
-    ESP_LOGI(TAG, "  - DSI Bit Rate: 600Mbps (reduced from 1000Mbps to prevent DMA bandwidth contention)");
-    ESP_LOGI(TAG, "  - Framebuffer: IRAM-only (prevents PSRAM contention with SD card)");
+    ESP_LOGI(TAG, "BSP display started successfully");
 
     // CRITICAL: Force LVGL to use only IRAM for display operations
     lv_display_set_default(display);

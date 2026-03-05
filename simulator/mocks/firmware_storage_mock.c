@@ -15,6 +15,15 @@
 
 static const char* TAG = "firmware_storage_mock";
 
+// Define missing ESP error codes
+#ifndef ESP_ERR_INVALID_VERSION
+#define ESP_ERR_INVALID_VERSION 0x110
+#endif
+
+#ifndef ESP_ERR_NO_SPACE
+#define ESP_ERR_NO_SPACE 0x111
+#endif
+
 esp_err_t firmware_storage_check_valid(bool* valid)
 {
     if (!valid) {
@@ -145,6 +154,89 @@ esp_err_t firmware_storage_read_firmware(const firmware_storage_entry_t* entry,
     }
 
     ESP_LOGI(TAG, "✓ Read %u bytes from firmware storage", entry->size);
+    return ESP_OK;
+}
+
+esp_err_t firmware_storage_add_entry(const char* name,
+                                     uint32_t offset,
+                                     uint32_t size,
+                                     uint32_t crc32)
+{
+    if (!name) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "Adding firmware entry to storage: %s @ offset 0x%X", name, offset);
+
+    // Read current header
+    firmware_storage_header_t header;
+    esp_err_t ret = flash_emulator_read(FIRMWARE_STORAGE_OFFSET, &header, sizeof(header));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read firmware storage header");
+        return ret;
+    }
+
+    // Check if storage is initialized
+    if (memcmp(header.magic, "FWST", 4) != 0) {
+        ESP_LOGI(TAG, "Initializing new firmware storage (erasing region)");
+        memset(&header, 0, sizeof(header));
+        memcpy(header.magic, "FWST", 4);
+        header.version = 1;
+        header.count = 0;
+        header.header_size = sizeof(firmware_storage_header_t);
+        // Note: simulator doesn't need erase, but we log it for consistency
+        ESP_LOGI(TAG, "Simulator: Skipping erase (not needed for RAM emulation)");
+    } else if (header.version != 1) {
+        ESP_LOGE(TAG, "Firmware storage version mismatch: %u", header.version);
+        return ESP_ERR_NOT_SUPPORTED;
+    } else if (header.count >= 100) {
+        ESP_LOGE(TAG, "Firmware storage full (%u entries)", header.count);
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Calculate where to write the new entry
+    size_t entry_offset = FIRMWARE_STORAGE_OFFSET + header.header_size +
+                         (header.count * sizeof(firmware_storage_entry_t));
+
+    // Create new entry
+    firmware_storage_entry_t entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.offset = offset;
+    entry.size = size;
+    entry.crc32 = crc32;
+    entry.flags = 0;
+    entry.next_offset = 0;
+
+    // Copy name with truncation if needed
+    size_t name_len = strlen(name);
+    if (name_len >= sizeof(entry.name)) {
+        name_len = sizeof(entry.name) - 1;
+        ESP_LOGW(TAG, "Firmware name truncated to %zu bytes", name_len);
+    }
+    memcpy(entry.name, name, name_len);
+    entry.name[name_len] = '\0';
+
+    // Write entry to flash emulator
+    ESP_LOGI(TAG, "Writing entry %u at offset 0x%X: %s (%u bytes, CRC32: 0x%08X)",
+             header.count, (unsigned int)entry_offset, entry.name, entry.size, entry.crc32);
+
+    ret = flash_emulator_write(entry_offset, &entry, sizeof(entry));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write firmware entry: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Update header
+    header.count++;
+
+    // Write updated header back to flash emulator
+    ret = flash_emulator_write(FIRMWARE_STORAGE_OFFSET, &header, sizeof(header));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to update firmware storage header: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "✓ Firmware entry added: %s (total: %u entries)", entry.name, header.count);
     return ESP_OK;
 }
 

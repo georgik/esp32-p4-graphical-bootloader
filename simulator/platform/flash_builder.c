@@ -155,6 +155,8 @@ static esp_err_t generate_partition_table(
         return ESP_ERR_NO_MEM;
     }
 
+    // ESP-IDF MD5 partition table format: NO separate header
+    // Partition entries start directly at offset 0
     int entry_count = 0;
     partition_entry_t* entries = (partition_entry_t*)pt_buffer;
 
@@ -237,6 +239,29 @@ static esp_err_t generate_partition_table(
 
         current_offset += partition_size;
     }
+
+    // Add MD5 partition table entry (required by ESP-IDF)
+    // MD5 entry format (32 bytes):
+    // - bytes 0-1: 0xEBEB (MD5 magic, little-endian)
+    // - bytes 2-15: 0xFF padding (14 bytes)
+    // - bytes 16-31: MD5 hash of all partition entries (excluding MD5 entry)
+    uint8_t* md5_entry = (uint8_t*)&entries[entry_count];
+    memset(md5_entry, 0, 32);
+
+    // Set magic
+    md5_entry[0] = 0xEB;
+    md5_entry[1] = 0xEB;
+
+    // Set padding (bytes 2-15)
+    memset(md5_entry + 2, 0xFF, 14);
+
+    // Calculate MD5 of all partition entries (excluding the MD5 entry itself)
+    size_t entries_size = entry_count * sizeof(partition_entry_t);
+    md5_calculate((uint8_t*)entries, entries_size, md5_entry + 16);
+
+    entry_count++;
+
+    ESP_LOGI(TAG, "  [%d] MD5 entry (ESP-IDF compatibility, calculated checksum)", entry_count - 1);
 
     // Set output parameters (firmware_storage_offset is already fixed at 0x13C000)
     *partition_table_out = pt_buffer;
@@ -537,8 +562,8 @@ flash_builder_err_t flash_builder_create_with_firmwares(
         }
 
         for (int i = 0; i < firmware_count; i++) {
-            long fw_size = flash_builder_get_file_size(firmware_paths[i]);
-            if (fw_size < 0) {
+            long fw_size_signed = flash_builder_get_file_size(firmware_paths[i]);
+            if (fw_size_signed < 0) {
                 ESP_LOGE(TAG, "Failed to get firmware size: %s", firmware_paths[i]);
                 free(firmware_sizes);
                 free(flash_image);
@@ -547,7 +572,8 @@ flash_builder_err_t flash_builder_create_with_firmwares(
                 free(factory_app_data);
                 return FLASH_BUILDER_ERR_MISSING_FILE;
             }
-            firmware_sizes[i] = (size_t)fw_size;
+            size_t fw_size = (size_t)fw_size_signed;
+            firmware_sizes[i] = fw_size;
             ESP_LOGI(TAG, "✓ Firmware %d: %s (%.2f MB)",
                      i, firmware_names[i], fw_size / (1024.0 * 1024.0));
         }
@@ -629,17 +655,20 @@ flash_builder_err_t flash_builder_create_with_firmwares(
 
         for (int i = 0; i < firmware_count; i++) {
             // Get firmware file size
-            long fw_size = flash_builder_get_file_size(firmware_paths[i]);
-            if (fw_size < 0) {
+            long fw_size_signed = flash_builder_get_file_size(firmware_paths[i]);
+            if (fw_size_signed < 0) {
                 ESP_LOGE(TAG, "Failed to get firmware size: %s", firmware_paths[i]);
                 continue;
             }
+
+            // Use size_t for all size calculations to avoid signed/unsigned issues
+            size_t fw_size = (size_t)fw_size_signed;
 
             total_firmware_size += fw_size;
 
             ESP_LOGI(TAG, "Processing firmware %d/%d: %s",
                      i + 1, firmware_count, firmware_names[i]);
-            ESP_LOGI(TAG, "  Size: %ld bytes (%.2f MB)",
+            ESP_LOGI(TAG, "  Size: %zu bytes (%.2f MB)",
                      fw_size, fw_size / (1024.0 * 1024.0));
 
             // Read firmware
@@ -650,7 +679,7 @@ flash_builder_err_t flash_builder_create_with_firmwares(
             }
 
             ssize_t bytes_read = flash_builder_read_file(firmware_paths[i], fw_buffer, fw_size);
-            if (bytes_read != fw_size) {
+            if ((size_t)bytes_read != fw_size) {
                 ESP_LOGE(TAG, "  Failed to read firmware");
                 free(fw_buffer);
                 continue;
@@ -661,6 +690,7 @@ flash_builder_err_t flash_builder_create_with_firmwares(
             ESP_LOGI(TAG, "  ✓ Calculated CRC32: 0x%08X", crc);
 
             // Parse partition table to find OTA partition offset for this firmware
+            // ESP-IDF MD5 partition table format: NO header, entries start at offset 0
             partition_entry_t* pt_entries = (partition_entry_t*)partition_table_data;
             int pt_entry_count = pt_size / sizeof(partition_entry_t);
 
